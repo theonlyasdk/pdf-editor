@@ -43,6 +43,14 @@ impl PageBox {
         px >= self.x && px <= (self.x + self.width) && py >= self.y && py <= (self.y + self.height)
     }
 
+    pub fn intersection(&self, other: &Self) -> Option<Self> {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = (self.x + self.width).min(other.x + other.width);
+        let top = (self.y + self.height).min(other.y + other.height);
+        (right > x && top > y).then(|| Self::new(x, y, right - x, top - y))
+    }
+
     pub fn intersects(&self, other: &PageBox) -> bool {
         self.x < (other.x + other.width)
             && (self.x + self.width) > other.x
@@ -59,6 +67,39 @@ pub struct PageInfo {
     pub rotation: i32,
     pub media_box: PageBox,
     pub crop_box: Option<PageBox>,
+}
+
+impl PageInfo {
+    /// Converts a top-left viewport crop into a bottom-left PDF page rectangle.
+    pub fn viewport_crop(&self, crop: PageBox) -> Option<PageBox> {
+        let crop = crop.intersection(&PageBox::new(0.0, 0.0, self.width, self.height))?;
+        let visible = self
+            .crop_box
+            .and_then(|box_| box_.intersection(&self.media_box))
+            .unwrap_or(self.media_box);
+        let (x, y, width, height) = match self.rotation.rem_euclid(360) {
+            90 => (crop.y, crop.x, crop.height, crop.width),
+            180 => (
+                visible.width - crop.x - crop.width,
+                crop.y,
+                crop.width,
+                crop.height,
+            ),
+            270 => (
+                visible.width - crop.y - crop.height,
+                visible.height - crop.x - crop.width,
+                crop.height,
+                crop.width,
+            ),
+            _ => (
+                crop.x,
+                visible.height - crop.y - crop.height,
+                crop.width,
+                crop.height,
+            ),
+        };
+        Some(PageBox::new(visible.x + x, visible.y + y, width, height))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

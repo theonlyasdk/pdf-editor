@@ -1,3 +1,5 @@
+import { DocumentDto } from "../types/editor";
+import { PageRasterQueue } from "./ui/PageRasterQueue";
 import { STRINGS } from "../i18n/strings";
 import { Backend } from "../ipc/backend";
 import { editorState } from "../state/editorState";
@@ -6,7 +8,9 @@ import { toast } from "./Toast";
 export class ThumbnailRailView {
   private element: HTMLElement;
   private draggedPageIndex: number | null = null;
-  private thumbnailCache: Map<string, string> = new Map();
+  private raster: PageRasterQueue | null = null;
+  private renderedDocument: DocumentDto | null = null;
+  private selection = "";
 
   constructor(element: HTMLElement) {
     this.element = element;
@@ -16,6 +20,8 @@ export class ThumbnailRailView {
 
   private render() {
     if (!editorState.doc) {
+      this.raster?.reset();
+      this.renderedDocument = null;
       this.element.style.display = "none";
       return;
     }
@@ -24,20 +30,38 @@ export class ThumbnailRailView {
 
     const doc = editorState.doc;
     const selectedCount = editorState.selectedPages.size;
+    const selection = `${editorState.currentPage}:${[...editorState.selectedPages].join(",")}`;
+    if (this.renderedDocument === doc) {
+      if (selection === this.selection) return;
+      this.selection = selection;
+      for (const card of this.element.querySelectorAll<HTMLElement>(".thumbnail-card")) {
+        const index = Number(card.dataset.pageIndex);
+        card.classList.toggle("selected", editorState.selectedPages.has(index));
+        card.classList.toggle("current", index === editorState.currentPage);
+      }
+      const feedback = this.element.querySelector("#rail-range-feedback");
+      if (feedback) feedback.textContent = selectedCount
+        ? STRINGS.pageOps.selectedCount.replace("{count}", String(selectedCount))
+        : "Type range & press Enter";
+      return;
+    }
+    this.raster?.reset();
+    this.renderedDocument = doc;
+    this.selection = selection;
 
     this.element.innerHTML = `
       <div class="rail-header">
         <div class="rail-tools">
-          <span class="fw-bold small">${doc.page_count} Pages</span>
-          <div class="btn-group btn-group-sm">
-            <button class="btn btn-outline-secondary btn-sm py-0 px-2" id="rail-select-all" title="Select All (Ctrl+A)">All</button>
-            <button class="btn btn-outline-secondary btn-sm py-0 px-2" id="rail-select-invert" title="Invert Selection">Invert</button>
-            <button class="btn btn-outline-secondary btn-sm py-0 px-2" id="rail-select-clear" title="Clear Selection">Clear</button>
+          <span class="font-semibold text-xs">${doc.page_count} Pages</span>
+          <div class="ui-button-group">
+            <button class="ui-button ui-button--outline ui-button--sm py-0 px-2" id="rail-select-all" title="Select All (Ctrl+A)">All</button>
+            <button class="ui-button ui-button--outline ui-button--sm py-0 px-2" id="rail-select-invert" title="Invert Selection">Invert</button>
+            <button class="ui-button ui-button--outline ui-button--sm py-0 px-2" id="rail-select-clear" title="Clear Selection">Clear</button>
           </div>
         </div>
         <div>
           <input type="text" class="page-range-input" id="rail-range-input" placeholder="e.g. 1-5, odd, last-2, !3..." title="Programmatic page range expression" />
-          <div id="rail-range-feedback" class="small text-muted mt-1" style="font-size: 11px;">
+          <div id="rail-range-feedback" class="text-xs text-muted-foreground mt-1" style="font-size: 11px;">
             ${selectedCount > 0 ? STRINGS.pageOps.selectedCount.replace("{count}", selectedCount.toString()) : "Type range & press Enter"}
           </div>
         </div>
@@ -51,13 +75,13 @@ export class ThumbnailRailView {
     this.bindRailEvents();
   }
 
-  private async renderThumbnailCards() {
+  private renderThumbnailCards() {
     const container = this.element.querySelector("#thumbnail-cards-list");
     if (!container || !editorState.doc) return;
 
     container.innerHTML = "";
     const doc = editorState.doc;
-    const rev = doc.revision_id;
+    this.raster = new PageRasterQueue(container as HTMLElement);
 
     for (let i = 0; i < doc.page_count; i++) {
       const pageInfo = doc.pages[i];
@@ -71,12 +95,12 @@ export class ThumbnailRailView {
 
       // Header row with page number and rotation indicator
       const metaRow = document.createElement("div");
-      metaRow.className = "d-flex justify-content-between w-100 px-1";
+      metaRow.className = "flex justify-between w-full px-1";
       metaRow.innerHTML = `
         <span class="thumbnail-label">${i + 1}</span>
         <div>
-          ${pageInfo.rotation !== 0 ? `<span class="badge bg-secondary py-0 px-1" style="font-size: 9px;">${pageInfo.rotation}°</span>` : ""}
-          ${pageInfo.crop_box ? `<span class="badge bg-info py-0 px-1" style="font-size: 9px;">Crop</span>` : ""}
+          ${pageInfo.rotation !== 0 ? `<span class="ui-badge py-0 px-1" style="font-size: 9px;">${pageInfo.rotation}°</span>` : ""}
+          ${pageInfo.crop_box ? `<span class="ui-badge py-0 px-1" style="font-size: 9px;">Crop</span>` : ""}
         </div>
       `;
       card.appendChild(metaRow);
@@ -86,19 +110,12 @@ export class ThumbnailRailView {
       img.className = "thumbnail-img";
       img.alt = `Page ${i + 1}`;
 
-      const cacheKey = `${i}-${pageInfo.width}-${pageInfo.rotation}-${rev}`;
-      if (this.thumbnailCache.has(cacheKey)) {
-        img.src = this.thumbnailCache.get(cacheKey)!;
-      } else {
-        // Asynchronously load thumbnail in background
-        Backend.renderPage(i, 200).then((dataUrl) => {
-          this.thumbnailCache.set(cacheKey, dataUrl);
-          img.src = dataUrl;
-        }).catch((err) => {
-          console.warn(`Thumbnail render failed for page ${i}:`, err);
-        });
-      }
-      card.appendChild(img);
+      const preview = document.createElement("div");
+      preview.className = "thumbnail-preview";
+      preview.style.aspectRatio = `${pageInfo.width} / ${pageInfo.height}`;
+      preview.appendChild(img);
+      card.appendChild(preview);
+      this.raster.add(preview, img, i, 200);
 
       // Drag and drop events for page reordering
       card.addEventListener("dragstart", (e) => {
@@ -198,11 +215,11 @@ export class ThumbnailRailView {
       try {
         const matched = await Backend.evaluateRange(val, editorState.doc.page_count);
         if (rangeFeedback) {
-          rangeFeedback.innerHTML = `<span class="text-success fw-semibold">${matched.length} page(s) match (${matched.map((p) => p + 1).join(", ")})</span>`;
+          rangeFeedback.innerHTML = `<span class="text-success font-semibold">${matched.length} page(s) match (${matched.map((p) => p + 1).join(", ")})</span>`;
         }
       } catch (err: any) {
         if (rangeFeedback) {
-          rangeFeedback.innerHTML = `<span class="text-danger">${err.toString()}</span>`;
+          rangeFeedback.innerHTML = `<span class="text-destructive">${err.toString()}</span>`;
         }
       }
     });

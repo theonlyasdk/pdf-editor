@@ -1,6 +1,6 @@
 # PDF Editor Desktop
 
-A fast, calm, professional desktop PDF editor built with **Tauri v2**, **Rust**, and **Bootstrap 6 (alpha)**. Designed from the ground up for privacy, performance, and true PDF specification compliance.
+A fast, calm, professional desktop PDF editor built with **Tauri v2**, **Rust**, and **shadcn/ui with Tailwind CSS**. Designed from the ground up for privacy, performance, and true PDF specification compliance.
 
 ---
 
@@ -24,8 +24,8 @@ A fast, calm, professional desktop PDF editor built with **Tauri v2**, **Rust**,
   - Option to permanently flatten annotations into the page stream.
 - **Safe Atomic Persistence**:
   - Writes to a temporary file, verifies the document reopens cleanly with matching page counts, optionally creates a `.bak` backup, and atomically replaces the original file.
-- **Calm, Zero-AI-Slop Interface**:
-  - Bootstrap 6 alpha tokens layered with neutral slate palettes and a single royal blue accent (`#2563eb`).
+- **Desktop interface**
+  - Light and dark themes, Lucide icons, and locally bundled Manrope and Lora fonts. See the [design system](docs/DESIGN_SYSTEM.md).
   - Searchable Command Palette (`Ctrl+K`), in-window keyboard shortcuts, toast notifications with Undo, and light/dark theme modes.
 
 ---
@@ -48,9 +48,9 @@ The project is structured cleanly as a Cargo workspace:
 │       │   └── types.rs         # Common DTOs and page geometries
 │       └── tests/               # Exhaustive test suites & fixtures (500+ pages)
 ├── src-tauri/            # Thin Tauri v2 IPC layer & window lifecycle
-├── src/                  # Modern TypeScript frontend (Bootstrap 6 alpha, Vite)
+├── src/                  # TypeScript frontend (shadcn/ui, Tailwind CSS, Vite)
 └── docs/
-    └── RESEARCH.md       # Bootstrap 6, Tauri v2, & PDF stack evaluation
+    └── RESEARCH.md       # Original Tauri, PDF stack, and UI research
 ```
 
 ---
@@ -62,6 +62,8 @@ The project is structured cleanly as a Cargo workspace:
 - **Platform**: Windows, macOS, or Linux
 
 ---
+
+The Windows bundle includes [PDFium 160.0.8165.0](https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium%2F8165). Its notices are in [bin/pdfium-notices](bin/pdfium-notices).
 
 ## Installation & Running
 
@@ -100,8 +102,8 @@ cargo tauri build
 ```
 Production outputs:
 - **Executable**: `target/release/pdf-editor.exe` (14.2 MB)
-- **NSIS Installer**: `target/release/bundle/nsis/PDF Editor_0.1.0_x64-setup.exe` (2.97 MB)
-- **MSI Installer**: `target/release/bundle/msi/PDF Editor_0.1.0_x64_en-US.msi` (4.51 MB)
+- **NSIS Installer**: `target/release/bundle/nsis/PDF Editor_0.2.0_x64-setup.exe` (2.97 MB)
+- **MSI Installer**: `target/release/bundle/msi/PDF Editor_0.2.0_x64_en-US.msi` (4.51 MB)
 
 ---
 

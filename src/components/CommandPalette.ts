@@ -263,8 +263,8 @@ export class CommandPaletteView {
     this.backdrop.style.display = "none";
 
     this.backdrop.innerHTML = `
-      <div class="command-palette-modal" id="palette-modal">
-        <input type="text" class="palette-search-input" id="palette-input" placeholder="${STRINGS.commandPalette.placeholder}" autocomplete="off" />
+      <div class="command-palette-modal" id="palette-modal" role="dialog" aria-label="Command palette">
+        <input type="text" class="palette-search-input" id="palette-input" aria-label="Search commands" placeholder="${STRINGS.commandPalette.placeholder}" autocomplete="off" />
         <div class="palette-results-list" id="palette-results"></div>
       </div>
     `;
@@ -319,7 +319,7 @@ export class CommandPaletteView {
 
     if (this.currentMatches.length === 0) {
       this.resultsContainer.innerHTML = `
-        <div class="p-4 text-center text-muted small">${STRINGS.commandPalette.noResults}</div>
+        <div class="p-4 text-center text-muted-foreground text-xs">${STRINGS.commandPalette.noResults}</div>
       `;
       return;
     }
@@ -328,9 +328,9 @@ export class CommandPaletteView {
       const item = document.createElement("div");
       item.className = `palette-item ${idx === this.selectedIndex ? "active" : ""}`;
       item.innerHTML = `
-        <div class="d-flex align-items-center gap-2">
-          <span class="badge bg-light text-dark border small">${cmd.category}</span>
-          <span class="fw-medium">${cmd.label}</span>
+        <div class="flex items-center gap-2">
+          <span class="ui-badge text-xs">${cmd.category}</span>
+          <span class="font-medium">${cmd.label}</span>
         </div>
         ${cmd.shortcut ? `<kbd class="palette-shortcut">${cmd.shortcut}</kbd>` : ""}
       `;
@@ -371,6 +371,7 @@ export class CommandPaletteView {
 
   private bindGlobalKeyboard() {
     window.addEventListener("keydown", (e) => {
+      if (editorState.openingFile) return;
       // Ctrl+K or Cmd+K
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();

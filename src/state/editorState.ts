@@ -11,9 +11,11 @@ class EditorState {
   currentPage: number = 0;
   selectedPages: Set<number> = new Set();
   selectedAnnotationId: string | null = null;
-  theme: "light" | "dark" = "light";
+  theme: "light" | "dark" =
+    typeof document !== "undefined" && document.documentElement.dataset.theme === "dark" ? "dark" : "light";
   recentFiles: string[] = [];
   cropBox: PageBox | null = null;
+  openingFile: string | null = null;
 
   toolSettings: ToolSettings = {
     strokeColor: "#2563eb",
@@ -37,11 +39,6 @@ class EditorState {
 
   private loadPersistedSettings() {
     try {
-      const savedTheme = localStorage.getItem("pdf_editor_theme");
-      if (savedTheme === "dark" || savedTheme === "light") {
-        this.theme = savedTheme;
-        document.documentElement.setAttribute("data-theme", savedTheme);
-      }
       const savedRecent = localStorage.getItem("pdf_editor_recent_files");
       if (savedRecent) {
         this.recentFiles = JSON.parse(savedRecent);
@@ -66,17 +63,24 @@ class EditorState {
     }
   }
 
+  setOpeningFile(name: string | null) {
+    this.openingFile = name;
+    this.notify();
+  }
+
   setDocument(doc: DocumentDto | null) {
     this.doc = doc;
     this.selectedPages.clear();
     this.selectedAnnotationId = null;
     this.currentPage = 0;
     this.cropBox = null;
+    if (this.activeTool === "crop") this.initCropBoxForCurrentPage();
 
     if (doc?.file_path) {
       this.addRecentFile(doc.file_path);
+    } else {
+      this.notify();
     }
-    this.notify();
   }
 
   addRecentFile(path: string) {
@@ -93,16 +97,21 @@ class EditorState {
     if (!this.doc) return;
     const page = this.doc.pages[this.currentPage];
     if (page) {
-      this.cropBox = page.crop_box ?? {
-        x: Math.round(page.width * 0.08),
-        y: Math.round(page.height * 0.08),
-        width: Math.round(page.width * 0.84),
-        height: Math.round(page.height * 0.84),
-      };
+      this.cropBox = { x: 0, y: 0, width: page.width, height: page.height };
     }
   }
 
   setCropBox(box: PageBox | null) {
+    const page = this.doc?.pages[this.currentPage];
+    if (box && page) {
+      const x = Math.max(0, Math.min(page.width - 1, box.x));
+      const y = Math.max(0, Math.min(page.height - 1, box.y));
+      box = {
+        x, y,
+        width: Math.max(1, Math.min(page.width - x, box.width)),
+        height: Math.max(1, Math.min(page.height - y, box.height)),
+      };
+    }
     this.cropBox = box;
     this.notify();
   }
@@ -140,6 +149,7 @@ class EditorState {
 
   setCurrentPage(page: number) {
     if (this.doc && page >= 0 && page < this.doc.page_count) {
+      if (this.currentPage === page) return;
       this.currentPage = page;
       if (this.activeTool === "crop") {
         this.initCropBoxForCurrentPage();

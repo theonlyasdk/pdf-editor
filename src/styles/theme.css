@@ -1,85 +1,103 @@
+﻿:root {
+  color-scheme: light;
+  --background: #f3f3f1;
+  --foreground: #252524;
+  --card: #fcfcfb;
+  --card-foreground: var(--foreground);
+  --popover: var(--card);
+  --popover-foreground: var(--foreground);
+  --primary: #235347;
+  --primary-foreground: #fff;
+  --secondary: #ebece8;
+  --secondary-foreground: var(--foreground);
+  --muted: #ebece8;
+  --muted-foreground: #5d625d;
+  --accent: #deebe5;
+  --accent-foreground: #235347;
+  --destructive: #a82424;
+  --destructive-foreground: #fff;
+  --destructive-muted: #f9e5e4;
+  --success: #256344;
+  --warning: #956112;
+  --border: #d8dad5;
+  --input: #bfc4bd;
+  --ring: #386e5e;
+  --radius: 6px;
+  --workspace: #e9ebe7;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #191b1a;
+  --foreground: #eeefec;
+  --card: #202321;
+  --primary: #a5d5bf;
+  --primary-foreground: #182c24;
+  --secondary: #292d2a;
+  --muted: #292d2a;
+  --muted-foreground: #aeb7af;
+  --accent: #2c4036;
+  --accent-foreground: #b9e4cf;
+  --destructive: #ffaaa6;
+  --destructive-foreground: #3a1210;
+  --destructive-muted: #402523;
+  --success: #a5d5bf;
+  --warning: #ebba6d;
+  --border: #363c37;
+  --input: #555e57;
+  --ring: #a5d5bf;
+  --workspace: #151716;
+}
+
 :root {
-  /* Color Palette - Light Mode */
-  --pdf-bg: #f8fafc;
-  --pdf-surface: #ffffff;
-  --pdf-surface-hover: #f1f5f9;
-  --pdf-surface-active: #e2e8f0;
-  --pdf-toolbar-bg: #ffffff;
-  --pdf-border: #e2e8f0;
-  --pdf-border-focus: #3b82f6;
-
-  --pdf-text-main: #0f172a;
-  --pdf-text-muted: #64748b;
-  --pdf-text-inverse: #ffffff;
-
-  --pdf-accent: #2563eb;
-  --pdf-accent-hover: #1d4ed8;
-  --pdf-accent-active: #1e40af;
-  --pdf-accent-subtle: #eff6ff;
-  --pdf-accent-border: #bfdbfe;
-
-  --pdf-danger: #dc2626;
-  --pdf-danger-subtle: #fef2f2;
-  --pdf-warning: #d97706;
-  --pdf-warning-subtle: #fffbeb;
-  --pdf-success: #16a34a;
-  --pdf-success-subtle: #f0fdf4;
-
-  /* Typography & Layout Spacing Scale (4/8/12/16/24) */
+  --pdf-bg: var(--background);
+  --pdf-surface: var(--card);
+  --pdf-surface-hover: var(--muted);
+  --pdf-surface-active: var(--accent);
+  --pdf-toolbar-bg: var(--card);
+  --pdf-border: var(--border);
+  --pdf-text-main: var(--foreground);
+  --pdf-text-muted: var(--muted-foreground);
+  --pdf-accent: var(--primary);
+  --pdf-accent-subtle: var(--accent);
+  --pdf-danger: var(--destructive);
+  --pdf-warning: var(--warning);
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
   --space-6: 24px;
-
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
-  --radius-xl: 14px;
-
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -1px rgba(0, 0, 0, 0.04);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-  --shadow-card: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
-
-  --transition-fast: 150ms cubic-bezier(0.2, 0, 0, 1);
-  --focus-ring: 0 0 0 2px #ffffff, 0 0 0 4px var(--pdf-accent);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --font-sans: "Manrope Variable", "Segoe UI", sans-serif;
+  --font-heading: "Lora Variable", Georgia, serif;
+  --shadow-sm: 0 1px 2px #0001;
+  --shadow-md: 0 2px 8px #0002;
+  --shadow-lg: 0 12px 28px #0004;
+  --transition-fast: 120ms ease-out;
+  --focus-ring: 0 0 0 2px var(--ring);
 }
 
-[data-theme="dark"] {
-  /* Rich deep obsidian & slate desktop theme */
-  --pdf-bg: #090d16;
-  --pdf-surface: #111827;
-  --pdf-surface-hover: #1e293b;
-  --pdf-surface-active: #334155;
-  --pdf-toolbar-bg: #0d121f;
-  --pdf-border: #1e293b;
-  --pdf-border-focus: #3b82f6;
-
-  --pdf-text-main: #f8fafc;
-  --pdf-text-muted: #8b9bb4;
-  --pdf-text-inverse: #090d16;
-
-  --pdf-accent: #3b82f6;
-  --pdf-accent-hover: #60a5fa;
-  --pdf-accent-active: #2563eb;
-  --pdf-accent-subtle: #1e3a8a;
-  --pdf-accent-border: #2563eb;
-
-  --pdf-danger: #ef4444;
-  --pdf-danger-subtle: #450a0a;
-  --pdf-warning: #f59e0b;
-  --pdf-warning-subtle: #451a03;
-  --pdf-success: #22c55e;
-  --pdf-success-subtle: #052e16;
-
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.6);
-  --shadow-card: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
-
-  --focus-ring: 0 0 0 2px #090d16, 0 0 0 4px var(--pdf-accent);
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
 }

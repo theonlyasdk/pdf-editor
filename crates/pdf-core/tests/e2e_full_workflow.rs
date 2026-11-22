@@ -57,7 +57,7 @@ fn test_end_to_end_full_user_workflow() {
     let crop_cmd = Box::new(CropPagesCommand {
         pages: vec![0],
         previous_boxes: vec![None],
-        new_box: Some(crop_box),
+        new_boxes: vec![Some(crop_box)],
     });
     cmd_mgr.execute(&mut doc, crop_cmd).unwrap();
     assert_eq!(doc.get_page_info(0).unwrap().crop_box, Some(crop_box));

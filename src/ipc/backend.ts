@@ -1,11 +1,8 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { AnnotationDto, DocumentDto, PageBox, SearchResult } from "../types/editor";
-
-// Check if running inside Tauri runtime
-const isTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 async function callIpc<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   if (isTauri()) {
-    const { invoke } = await import("@tauri-apps/api/core");
     return invoke<T>(cmd, args);
   }
   throw new Error(`Tauri IPC not available for '${cmd}' outside desktop app`);

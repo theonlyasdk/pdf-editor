@@ -1,13 +1,27 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-starting>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PDF Editor</title>
-    <!-- Bootstrap 6 alpha 1 distribution stylesheet -->
-    <link rel="stylesheet" href="/node_modules/bootstrap/dist/css/bootstrap.min.css" />
-    <!-- Application custom styles & semantic tokens -->
-    <link rel="stylesheet" href="/src/styles/theme.css" />
+    <meta name="color-scheme" content="light dark" />
+    <style>
+      html { background: #f3f3f1; color-scheme: light; }
+      @media (prefers-color-scheme: dark) {
+        html:not([data-theme]) { background: #191b1a; color-scheme: dark; }
+      }
+      html[data-theme="dark"] { background: #191b1a; color-scheme: dark; }
+      html[data-starting] #app-root { visibility: hidden; }
+    </style>
+    <script>
+      (() => {
+        let saved;
+        try { saved = localStorage.getItem("pdf_editor_theme"); } catch {}
+        document.documentElement.dataset.theme = saved === "light" || saved === "dark"
+          ? saved
+          : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      })();
+    </script>
     <link rel="stylesheet" href="/src/styles/app.css" />
   </head>
   <body>
@@ -16,7 +30,7 @@
       <header id="app-header" class="app-header" role="banner"></header>
 
       <!-- Secondary Slim Action Toolbar -->
-      <nav id="action-toolbar" class="action-toolbar" role="toolbar" aria-label="Editor Tools"></nav>
+      <nav id="action-toolbar" style="display: none" class="action-toolbar" role="toolbar" aria-label="Editor Tools"></nav>
 
       <!-- Main Workspace (Three-panel layout) -->
       <main class="main-workspace" role="main">
@@ -38,6 +52,10 @@
         <span id="status-page-info">Ready</span>
         <span id="status-zoom-info">100%</span>
       </footer>
+    </div>
+
+    <div id="document-loading" class="document-loading" hidden>
+      <p role="status"></p>
     </div>
 
     <!-- Application Script -->

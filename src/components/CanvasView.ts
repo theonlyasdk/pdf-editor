@@ -1,12 +1,18 @@
+import { PageRasterQueue } from "./ui/PageRasterQueue";
 import { Backend } from "../ipc/backend";
 import { editorState } from "../state/editorState";
-import { AnnotationDto, PageBox, PageInfo } from "../types/editor";
+import { AnnotationDto, DocumentDto, PageBox, PageInfo } from "../types/editor";
 import { toast } from "./Toast";
 
 export class CanvasViewportView {
   private element: HTMLElement;
   private pagesContainer: HTMLElement;
-  private renderedPages: Map<number, HTMLImageElement> = new Map();
+  private raster: PageRasterQueue;
+  private renderedDocument: DocumentDto | null = null;
+  private layout = "";
+  private cropOverlayPage: number | null = null;
+  private shownCropBox: PageBox | null = null;
+  private shownCropRatio = "";
   private isDrawing = false;
   private startPoint: { x: number; y: number } | null = null;
   private currentSvgOverlay: SVGSVGElement | null = null;
@@ -23,6 +29,7 @@ export class CanvasViewportView {
 
   constructor(element: HTMLElement) {
     this.element = element;
+    this.raster = new PageRasterQueue(element);
     this.element.className = "canvas-viewport";
 
     this.pagesContainer = document.createElement("div");
@@ -37,6 +44,9 @@ export class CanvasViewportView {
 
   private render() {
     if (!editorState.doc) {
+      this.raster.reset();
+      this.pagesContainer.replaceChildren();
+      this.renderedDocument = null;
       this.element.style.display = "none";
       return;
     }
@@ -64,12 +74,36 @@ export class CanvasViewportView {
       pagesToRender = Array.from({ length: doc.page_count }, (_, i) => i);
     }
 
-    this.pagesContainer.innerHTML = "";
+    const layout = `${mode}:${zoom}:${pagesToRender[0]}`;
+    if (this.renderedDocument !== doc || this.layout !== layout) {
+      this.renderedDocument = doc;
+      this.layout = layout;
+      this.cropOverlayPage = null;
+      this.raster.reset();
+      this.pagesContainer.replaceChildren();
+      const pages = document.createDocumentFragment();
+      for (const index of pagesToRender) {
+        pages.appendChild(this.createPageElement(index, doc.pages[index], zoom));
+      }
+      this.pagesContainer.appendChild(pages);
+    }
 
-    for (const pageIdx of pagesToRender) {
-      const pageInfo = doc.pages[pageIdx];
-      const pageWrapper = this.createPageElement(pageIdx, pageInfo, zoom);
-      this.pagesContainer.appendChild(pageWrapper);
+    const cropPage = editorState.activeTool === "crop" ? editorState.currentPage : null;
+    const cropBox = editorState.cropBox;
+    const ratio = editorState.toolSettings.cropRatioMode;
+    if (cropPage === this.cropOverlayPage && cropBox === this.shownCropBox && ratio === this.shownCropRatio) return;
+    this.pagesContainer.querySelector(".crop-interactive-overlay")?.remove();
+    this.pagesContainer.querySelector(".crop-floating-hud")?.remove();
+    this.cropOverlayPage = cropPage;
+    this.shownCropBox = cropBox;
+    this.shownCropRatio = ratio;
+    if (cropPage === null || !cropBox) return;
+
+    const wrapper = this.pagesContainer.querySelector<HTMLElement>(`#pdf-page-${cropPage}`);
+    const svg = wrapper?.querySelector("svg");
+    if (wrapper && svg) {
+      this.cropActivePage = cropPage;
+      this.renderCropOverlay(wrapper, svg, doc.pages[cropPage], zoom, cropBox);
     }
   }
 
@@ -95,14 +129,7 @@ export class CanvasViewportView {
     // High resolution target width (2x for Retina / HiDPI crispness)
     const renderDpiWidth = Math.max(800, Math.round(scaledWidth * (window.devicePixelRatio || 1)));
 
-    // Background asynchronous page rasterization via Backend
-    Backend.renderPage(pageIndex, renderDpiWidth)
-      .then((dataUrl) => {
-        img.src = dataUrl;
-      })
-      .catch((err) => {
-        console.error(`Page ${pageIndex} render error:`, err);
-      });
+    this.raster.add(wrapper, img, pageIndex, renderDpiWidth);
 
     // SVG Drawing & Interactive Annotation Layer
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -111,16 +138,7 @@ export class CanvasViewportView {
     svg.setAttribute("data-page-index", pageIndex.toString());
     wrapper.appendChild(svg);
 
-    // If Crop tool is active on this page, render the interactive crop box & handles
-    if (editorState.activeTool === "crop" && pageIndex === editorState.currentPage) {
-      this.cropActivePage = pageIndex;
-      if (!editorState.cropBox) {
-        editorState.initCropBoxForCurrentPage();
-      }
-      this.renderCropOverlay(wrapper, svg, pageIndex, pageInfo, zoom);
-    } else {
-      this.bindDrawingOnSvg(svg, pageIndex, pageInfo);
-    }
+    this.bindDrawingOnSvg(svg, pageIndex, pageInfo);
 
     return wrapper;
   }
@@ -132,17 +150,10 @@ export class CanvasViewportView {
   private renderCropOverlay(
     wrapper: HTMLElement,
     svg: SVGSVGElement,
-    pageIndex: number,
     pageInfo: PageInfo,
-    zoom: number
+    zoom: number,
+    box: PageBox
   ) {
-    const box = editorState.cropBox || {
-      x: Math.round(pageInfo.width * 0.08),
-      y: Math.round(pageInfo.height * 0.08),
-      width: Math.round(pageInfo.width * 0.84),
-      height: Math.round(pageInfo.height * 0.84),
-    };
-
     const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
     g.setAttribute("class", "crop-interactive-overlay");
 
@@ -327,11 +338,11 @@ export class CanvasViewportView {
       <div class="crop-hud-inner">
         <span class="crop-hud-dims">${Math.round(box.width)} × ${Math.round(box.height)} pt</span>
         <span class="crop-hud-badge ${isLocked ? "locked" : ""}" id="crop-hud-ratio-tag">
-          ${isLocked ? `🔒 Fixed Ratio (${(box.width / Math.max(1, box.height)).toFixed(2)})` : "Free Ratio (Hold Ctrl to Lock)"}
+          ${isLocked ? `Fixed ratio (${(box.width / Math.max(1, box.height)).toFixed(2)})` : "Free Ratio (Hold Ctrl to Lock)"}
         </span>
         <div class="crop-hud-actions">
-          <button class="btn btn-sm btn-primary py-0 px-2 fw-medium" id="hud-crop-apply">Apply (Enter)</button>
-          <button class="btn btn-sm btn-outline-secondary py-0 px-2 text-white" id="hud-crop-cancel">Cancel (Esc)</button>
+          <button class="ui-button ui-button--sm ui-button--default py-0 px-2 font-medium" id="hud-crop-apply">Apply (Enter)</button>
+          <button class="ui-button ui-button--sm ui-button--outline py-0 px-2" id="hud-crop-cancel">Cancel (Esc)</button>
         </div>
       </div>
     `;
@@ -350,7 +361,9 @@ export class CanvasViewportView {
         this.updateCropHudBadges();
       }
 
-      if (editorState.activeTool === "crop") {
+      if (editorState.activeTool === "crop" && !editorState.openingFile &&
+          !(e.target instanceof Element && e.target.closest("input, select, textarea, button, [contenteditable]")) &&
+          !document.querySelector("#palette-modal")?.getBoundingClientRect().width) {
         if (e.key === "Enter") {
           e.preventDefault();
           this.applyActiveCrop();
@@ -370,7 +383,7 @@ export class CanvasViewportView {
 
     // Window mousemove for handle dragging
     window.addEventListener("mousemove", (e) => {
-      if (!this.cropDragHandle || !this.cropStartPt || !this.cropStartBox || !editorState.doc) {
+      if (editorState.activeTool !== "crop" || !this.cropDragHandle || !this.cropStartPt || !this.cropStartBox || !editorState.doc) {
         return;
       }
 
@@ -475,6 +488,7 @@ export class CanvasViewportView {
         let w = sb.width;
         let x = sb.x;
         if (lockRatio) {
+          h = Math.min(h, pageInfo.width / targetRatio);
           w = h * targetRatio;
           x = Math.max(0, Math.min(pageInfo.width - w, sb.x + (sb.width - w) / 2));
         }
@@ -484,6 +498,7 @@ export class CanvasViewportView {
         let w = sb.width;
         let x = sb.x;
         if (lockRatio) {
+          h = Math.min(h, pageInfo.width / targetRatio);
           w = h * targetRatio;
           x = Math.max(0, Math.min(pageInfo.width - w, sb.x + (sb.width - w) / 2));
         }
@@ -494,6 +509,7 @@ export class CanvasViewportView {
         let h = sb.height;
         let y = sb.y;
         if (lockRatio) {
+          w = Math.min(w, pageInfo.height * targetRatio);
           h = w / targetRatio;
           y = Math.max(0, Math.min(pageInfo.height - h, sb.y + (sb.height - h) / 2));
         }
@@ -503,6 +519,7 @@ export class CanvasViewportView {
         let h = sb.height;
         let y = sb.y;
         if (lockRatio) {
+          w = Math.min(w, pageInfo.height * targetRatio);
           h = w / targetRatio;
           y = Math.max(0, Math.min(pageInfo.height - h, sb.y + (sb.height - h) / 2));
         }
@@ -528,7 +545,7 @@ export class CanvasViewportView {
         const ratio = editorState.cropBox
           ? (editorState.cropBox.width / Math.max(1, editorState.cropBox.height)).toFixed(2)
           : "1.00";
-        tag.textContent = `🔒 Fixed Ratio (${ratio})`;
+        tag.textContent = `Fixed ratio (${ratio})`;
       } else {
         tag.classList.remove("locked");
         tag.textContent = "Free Ratio (Hold Ctrl to Lock)";
@@ -539,11 +556,13 @@ export class CanvasViewportView {
   async applyActiveCrop() {
     if (!editorState.cropBox || !editorState.doc) return;
     try {
-      const updated = await Backend.cropPages([editorState.currentPage], editorState.cropBox);
+      const page = editorState.currentPage;
+      const updated = await Backend.cropPages([page], editorState.cropBox);
       editorState.setDocument(updated);
       editorState.setTool("select");
+      editorState.setCurrentPage(page);
       toast.show({
-        message: `Crop applied to page ${editorState.currentPage + 1}`,
+        message: `Crop applied to page ${page + 1}`,
         type: "success",
       });
     } catch (err: any) {

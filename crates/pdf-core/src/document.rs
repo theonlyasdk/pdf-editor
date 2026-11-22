@@ -108,49 +108,45 @@ impl DocumentState {
 
     pub fn get_page_info(&self, page_index: usize) -> Result<PageInfo, CoreError> {
         let page_id = self.get_page_id(page_index)?;
-        let page_dict = self.doc.get_dictionary(page_id)?;
-
-        // MediaBox: defaults to standard US Letter [0, 0, 612, 792] if absent
-        let media_box = if let Ok(mb_arr) = page_dict.get(b"MediaBox") {
-            let nums = mb_arr
-                .as_array()?
-                .iter()
-                .filter_map(|o| match o {
-                    Object::Real(f) => Some(*f as f64),
-                    Object::Integer(i) => Some(*i as f64),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            PageBox::from_rect_array(&nums).unwrap_or(PageBox::new(0.0, 0.0, 612.0, 792.0))
-        } else {
-            PageBox::new(0.0, 0.0, 612.0, 792.0)
-        };
-
-        // CropBox
-        let crop_box = if let Ok(cb_arr) = page_dict.get(b"CropBox") {
-            let nums = cb_arr
-                .as_array()?
-                .iter()
-                .filter_map(|o| match o {
-                    Object::Real(f) => Some(*f as f64),
-                    Object::Integer(i) => Some(*i as f64),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            PageBox::from_rect_array(&nums)
-        } else {
+        let inherited = |key: &[u8]| {
+            let mut current = self.doc.get_dictionary(page_id).ok();
+            let mut visited = std::collections::HashSet::new();
+            while let Some(dict) = current {
+                if let Ok(value) = dict.get_deref(key, &self.doc) {
+                    return Some(value);
+                }
+                let parent = dict.get(b"Parent").ok()?.as_reference().ok()?;
+                if !visited.insert(parent) {
+                    return None;
+                }
+                current = self.doc.get_dictionary(parent).ok();
+            }
             None
         };
-
-        // Rotation
-        let rotation = if let Ok(rot_obj) = page_dict.get(b"Rotate") {
-            rot_obj.as_i64().unwrap_or(0) as i32
-        } else {
-            0
+        let read_box = |key: &[u8]| {
+            let rect = inherited(key)?.as_array().ok()?;
+            let numbers: Vec<_> = rect
+                .iter()
+                .map(|item| match item {
+                    Object::Real(value) => Some(*value as f64),
+                    Object::Integer(value) => Some(*value as f64),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?;
+            PageBox::from_rect_array(&numbers).filter(|rect| rect.width > 0.0 && rect.height > 0.0)
         };
-
-        let width = crop_box.map(|c| c.width).unwrap_or(media_box.width);
-        let height = crop_box.map(|c| c.height).unwrap_or(media_box.height);
+        let media_box = read_box(b"MediaBox").unwrap_or(PageBox::new(0.0, 0.0, 612.0, 792.0));
+        let crop_box = read_box(b"CropBox");
+        let rotation = inherited(b"Rotate")
+            .and_then(|object| object.as_i64().ok())
+            .unwrap_or(0) as i32;
+        let visible = crop_box
+            .and_then(|crop| crop.intersection(&media_box))
+            .unwrap_or(media_box);
+        let (width, height) = match rotation.rem_euclid(360) {
+            90 | 270 => (visible.height, visible.width),
+            _ => (visible.width, visible.height),
+        };
 
         Ok(PageInfo {
             index: page_index,

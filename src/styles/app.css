@@ -1,34 +1,26 @@
+@import "@fontsource-variable/manrope";
+@import "@fontsource-variable/lora";
+@import "tailwindcss";
 @import "./theme.css";
+@import "./ui.css";
 
-/* Reset & Global */
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-  user-select: none;
-}
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--foreground);
+    background: var(--background);
+    overflow: hidden;
+  }
 
-body {
-  font-family: var(--font-sans);
-  font-size: 13px;
-  line-height: 1.4;
-  color: var(--pdf-text-main);
-  background-color: var(--pdf-bg);
-  overflow: hidden;
-  height: 100vh;
-  width: 100vw;
-  -webkit-font-smoothing: antialiased;
-}
+  h1, h2, h3 { font-family: var(--font-heading); }
+  button, input, select, textarea, kbd { font-family: inherit; }
 
-input, button, select, textarea {
-  font-family: inherit;
-  font-size: inherit;
-  user-select: text;
-}
-
-button:focus-visible, input:focus-visible, select:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
+  :is(button, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
 }
 
 /* App Shell Layout */
@@ -42,7 +34,8 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 /* Top App Header / Titlebar */
 .app-header {
-  height: 40px;
+  height: 48px;
+  flex-shrink: 0;
   background: var(--pdf-surface);
   border-bottom: 1px solid var(--pdf-border);
   display: flex;
@@ -52,11 +45,16 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   z-index: 10;
 }
 
-.header-left, .header-center, .header-right {
+.header-left, .header-center, .header-right, .document-controls {
   display: flex;
   align-items: center;
   gap: var(--space-2);
 }
+
+.document-controls { gap: 4px; }
+.header-center { min-width: 0; }
+
+.app-header:not(.has-document) :is(.document-controls, .header-center) { display: none; }
 
 .app-brand {
   display: flex;
@@ -115,42 +113,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   margin: 0 var(--space-1);
 }
 
-.btn-tool {
-  height: 30px;
-  min-width: 30px;
-  padding: 0 var(--space-2);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--pdf-text-main);
-  cursor: pointer;
-  transition: all var(--transition-fast);
-  font-size: 12px;
-}
-
-.btn-tool:hover {
-  background: var(--pdf-surface-hover);
-}
-
-.btn-tool:active {
-  background: var(--pdf-surface-active);
-}
-
-.btn-tool.active {
-  background: var(--pdf-accent-subtle);
-  border-color: var(--pdf-accent-border);
-  color: var(--pdf-accent);
-}
-
-.btn-tool:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
 /* Main Workspace */
 .main-workspace {
   flex: 1;
@@ -161,7 +123,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 /* Left Thumbnail Rail */
 .thumbnail-rail {
-  width: 250px;
+  width: 216px;
   background: var(--pdf-surface);
   border-right: 1px solid var(--pdf-border);
   display: flex;
@@ -259,7 +221,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 /* Center Canvas Viewport */
 .canvas-viewport {
   flex: 1;
-  background: var(--pdf-bg);
+  background: var(--workspace);
   overflow: auto;
   position: relative;
   display: flex;
@@ -291,6 +253,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 .pdf-page-wrapper {
   position: relative;
+  box-sizing: content-box;
   background: #ffffff;
   box-shadow: var(--shadow-md);
   border: 1px solid rgba(0, 0, 0, 0.1);
@@ -311,7 +274,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 /* Right Properties Panel */
 .properties-panel {
-  width: 270px;
+  width: 244px;
   background: var(--pdf-surface);
   border-left: 1px solid var(--pdf-border);
   display: flex;
@@ -354,8 +317,6 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   font-size: 11px;
   font-weight: 500;
   color: var(--pdf-text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
 .color-presets {
@@ -395,134 +356,87 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   z-index: 10;
 }
 
-/* Empty State / Dropzone */
+/* Welcome */
 .empty-state-overlay {
   position: absolute;
   inset: 0;
-  background: var(--pdf-bg);
+  background: var(--background);
   display: flex;
-  align-items: center;
-  justify-content: center;
+  overflow: auto;
+  padding: clamp(24px, 6vh, 64px) 24px;
   z-index: 20;
 }
 
-.empty-state-card {
-  width: 520px;
-  max-width: 90vw;
-  padding: 32px;
-  background: var(--pdf-surface);
-  border: 1px solid var(--pdf-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-card);
+.welcome {
+  margin: auto;
+  width: min(100%, 530px);
+}
+
+.welcome h1 {
+  font-size: 42px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+}
+
+.welcome-hint {
+  color: var(--muted-foreground);
+  margin-top: 8px;
+}
+
+.welcome-actions {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: var(--space-4);
-  transition: all var(--transition-fast);
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 20px;
 }
 
-.empty-state-card.drag-over {
-  border-color: var(--pdf-accent);
-  background: var(--pdf-accent-subtle);
-  transform: scale(1.01);
+.welcome-recent {
+  margin-top: 36px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
 }
 
-.empty-icon-badge {
-  width: 68px;
-  height: 68px;
-  border-radius: 18px;
-  background: linear-gradient(135deg, rgba(37, 99, 235, 0.15) 0%, rgba(59, 130, 246, 0.05) 100%);
-  border: 1px solid rgba(59, 130, 246, 0.25);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--pdf-accent);
-  box-shadow: 0 0 24px rgba(37, 99, 235, 0.15);
+.welcome-recent h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 10px;
 }
 
-.empty-icon {
-  width: 34px;
-  height: 34px;
-  color: var(--pdf-accent);
+.welcome.drag-over, .window-drag-over .welcome {
+  outline: 2px dashed var(--ring);
+  outline-offset: 14px;
+  border-radius: var(--radius);
 }
 
 .recent-docs-container {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 220px;
-  overflow-y: auto;
-  padding: 2px;
+  display: grid;
+  gap: 3px;
 }
 
 .recent-doc-card {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 9px 12px;
-  background: var(--pdf-surface);
-  border: 1px solid var(--pdf-border);
-  border-radius: var(--radius-md);
-  cursor: pointer;
   width: 100%;
+  padding: 10px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
   text-align: left;
-  transition: all var(--transition-fast);
 }
 
-.recent-doc-card:hover {
-  background: var(--pdf-surface-hover);
-  border-color: var(--pdf-accent-border);
-  transform: translateY(-1px);
-}
-
-.recent-doc-badge {
-  background: #ef4444;
-  color: #ffffff;
-  font-weight: 700;
-  font-size: 10px;
-  letter-spacing: 0.5px;
-  padding: 3px 6px;
-  border-radius: 4px;
-  flex-shrink: 0;
-}
-
-.recent-doc-info {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-}
-
-.recent-doc-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--pdf-text-main);
+.recent-doc-card:hover { background: var(--muted); }
+.recent-doc-card svg { color: var(--muted-foreground); flex: none; }
+.recent-doc-info { flex: 1; min-width: 0; }
+.recent-doc-name, .recent-doc-path {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.recent-doc-path {
-  font-size: 11px;
-  color: var(--pdf-text-muted);
-  font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.recent-doc-arrow {
-  color: var(--pdf-text-muted);
-  opacity: 0.5;
-  transition: all var(--transition-fast);
-}
-
-.recent-doc-card:hover .recent-doc-arrow {
-  color: var(--pdf-accent);
-  opacity: 1;
-  transform: translateX(3px);
-}
+.recent-doc-name { font-weight: 700; }
+.recent-doc-path { color: var(--muted-foreground); font-size: 12px; }
 
 /* Command Palette (Ctrl+K) */
 .command-palette-backdrop {
@@ -534,11 +448,10 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   justify-content: center;
   padding-top: 100px;
   z-index: 100;
-  backdrop-filter: blur(2px);
 }
 
 .command-palette-modal {
-  width: 560px;
+  width: min(560px, calc(100% - 32px));
   background: var(--pdf-surface);
   border: 1px solid var(--pdf-border);
   border-radius: var(--radius-lg);
@@ -580,7 +493,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 
 .palette-shortcut {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 11px;
   color: var(--pdf-text-muted);
   background: var(--pdf-bg);
@@ -680,21 +593,19 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   align-items: center;
   gap: 10px;
   padding: 6px 14px;
-  background: rgba(17, 24, 39, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 24px;
-  box-shadow: 0 12px 28px -6px rgba(0, 0, 0, 0.65);
-  backdrop-filter: blur(10px);
-  color: #f8fafc;
+  background: var(--popover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  color: var(--popover-foreground);
   font-size: 12px;
   white-space: nowrap;
 }
 
 .crop-hud-dims {
-  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
   font-size: 12px;
-  color: #ffffff;
 }
 
 .crop-hud-badge {
@@ -702,17 +613,14 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   font-weight: 500;
   padding: 2px 8px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  color: #94a3b8;
-  transition: all var(--transition-fast);
+  background: var(--muted);
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
 }
 
 .crop-hud-badge.locked {
-  background: #2563eb;
-  color: #ffffff;
-  border-color: #3b82f6;
-  box-shadow: 0 0 10px rgba(59, 130, 246, 0.45);
+  background: var(--accent);
+  color: var(--accent-foreground);
 }
 
 .crop-hud-actions {
@@ -720,4 +628,80 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   align-items: center;
   gap: 6px;
   margin-left: 2px;
+}
+
+.toast-error { border-color: var(--destructive); }
+.toast-success { border-color: var(--success); }
+.toast-warning { border-color: var(--warning); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0s !important; }
+}
+.document-loading:not([hidden]) {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--background) 88%, transparent);
+}
+
+.document-loading p {
+  max-width: min(80vw, 440px);
+  overflow-wrap: anywhere;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--popover);
+  color: var(--popover-foreground);
+}
+
+.thumbnail-preview {
+  position: relative;
+  width: 100%;
+  border: 1px solid var(--border);
+}
+
+.thumbnail-preview .thumbnail-img {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  object-fit: contain;
+}
+
+[data-raster]:not([data-raster="ready"]) {
+  background: var(--card);
+}
+
+[data-raster]:not([data-raster="ready"]) > img {
+  visibility: hidden;
+}
+
+[data-raster="loading"][data-raster-visible]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent 25%, var(--muted) 50%, transparent 75%);
+  animation: page-shimmer 1.5s linear infinite;
+}
+
+@keyframes page-shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+
+[data-raster="loading"][data-raster-visible] { overflow: clip; }
+
+.page-raster-retry {
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-raster="loading"][data-raster-visible]::before { animation: none; }
 }

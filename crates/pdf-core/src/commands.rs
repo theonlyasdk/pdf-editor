@@ -138,12 +138,15 @@ impl DocumentCommand for RotatePagesCommand {
 pub struct CropPagesCommand {
     pub pages: Vec<usize>,
     pub previous_boxes: Vec<Option<PageBox>>,
-    pub new_box: Option<PageBox>,
+    pub new_boxes: Vec<Option<PageBox>>,
 }
 
 impl DocumentCommand for CropPagesCommand {
     fn execute(&mut self, doc: &mut DocumentState) -> Result<(), CoreError> {
-        doc.set_crop_box(&self.pages, self.new_box)
+        for (&page, &box_) in self.pages.iter().zip(&self.new_boxes) {
+            doc.set_crop_box(&[page], box_)?;
+        }
+        Ok(())
     }
 
     fn undo(&mut self, doc: &mut DocumentState) -> Result<(), CoreError> {

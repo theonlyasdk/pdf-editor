@@ -1,4 +1,5 @@
-import { editorState } from "../state/editorState";
+import { X } from "lucide";
+import { icon } from "./ui/icon";
 
 export interface ToastOptions {
   message: string;
@@ -24,6 +25,7 @@ class ToastManager {
     if (!this.container) this.init();
 
     const toast = document.createElement("div");
+    toast.setAttribute("role", options.type === "error" ? "alert" : "status");
     toast.className = `toast-item toast-${options.type || "info"}`;
 
     const textSpan = document.createElement("span");
@@ -33,7 +35,7 @@ class ToastManager {
 
     if (options.undoAction) {
       const undoBtn = document.createElement("button");
-      undoBtn.className = "btn btn-sm btn-outline-primary py-0 px-2";
+      undoBtn.className = "ui-button ui-button--sm ui-button--outline";
       undoBtn.textContent = "Undo";
       undoBtn.onclick = () => {
         options.undoAction?.();
@@ -43,8 +45,9 @@ class ToastManager {
     }
 
     const closeBtn = document.createElement("button");
-    closeBtn.className = "btn-close btn-close-sm ms-2";
+    closeBtn.className = "ui-button ui-button--tool";
     closeBtn.setAttribute("aria-label", "Close");
+    closeBtn.innerHTML = icon(X);
     closeBtn.onclick = () => this.dismiss(toast);
     toast.appendChild(closeBtn);
 

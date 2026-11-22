@@ -104,11 +104,11 @@ export const STRINGS = {
     noResults: "No matching commands found.",
   },
   emptyState: {
-    headline: "Open or drop a PDF to begin editing",
-    subheadline: "Fast, accurate, local desktop PDF editor with true redaction and vector annotations.",
-    browseButton: "Open PDF Document",
-    dragHint: "Drag and drop any PDF file anywhere onto this window",
-    recentFiles: "Recent Documents",
+    headline: "Open a PDF",
+    browseButton: "Open file",
+    newButton: "New blank PDF",
+    dragHint: "Drop a PDF anywhere in this window.",
+    recentFiles: "Recent documents",
     noRecent: "No recent documents",
   },
   toasts: {

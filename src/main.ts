@@ -1,3 +1,5 @@
+import { isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CanvasViewportView } from "./components/CanvasView";
 import { CommandPaletteView } from "./components/CommandPalette";
 import { EmptyStateView } from "./components/EmptyState";
@@ -5,7 +7,7 @@ import { PropertiesPanelView } from "./components/PropertiesPanel";
 import { ThumbnailRailView } from "./components/ThumbnailRail";
 import { toast } from "./components/Toast";
 import { ToolbarView } from "./components/Toolbar";
-import { Backend } from "./ipc/backend";
+import { openPdf } from "./components/OpenPdf";
 import { editorState } from "./state/editorState";
 
 async function setupWindowDragDrop() {
@@ -13,7 +15,7 @@ async function setupWindowDragDrop() {
     const { getCurrentWebview } = await import("@tauri-apps/api/webview");
     const webview = getCurrentWebview();
 
-    webview.onDragDropEvent(async (event) => {
+    await webview.onDragDropEvent(async (event) => {
       const payload = event.payload;
       if (payload.type === "enter" || payload.type === "over") {
         document.body.classList.add("window-drag-over");
@@ -23,24 +25,7 @@ async function setupWindowDragDrop() {
         document.body.classList.remove("window-drag-over");
         const paths = payload.paths;
         if (paths && paths.length > 0) {
-          const targetPath = paths[0];
-          if (!targetPath.toLowerCase().endsWith(".pdf")) {
-            toast.show({
-              message: "Unsupported file format. Please drop a valid .pdf file.",
-              type: "error",
-            });
-            return;
-          }
-          try {
-            const doc = await Backend.openDocument(targetPath);
-            editorState.setDocument(doc);
-            toast.show({
-              message: `Opened '${doc.file_name}' (${doc.page_count} pages)`,
-              type: "success",
-            });
-          } catch (err: any) {
-            toast.show({ message: `Failed to open PDF: ${err}`, type: "error" });
-          }
+          await openPdf(paths[0]);
         }
       }
     });
@@ -51,17 +36,7 @@ async function setupWindowDragDrop() {
       e.preventDefault();
       if (e.dataTransfer?.files?.length) {
         const file = e.dataTransfer.files[0];
-        const path = file.path || file.name;
-        if (!path.toLowerCase().endsWith(".pdf")) {
-          toast.show({ message: "Please drop a .pdf file.", type: "error" });
-          return;
-        }
-        try {
-          const doc = await Backend.openDocument(path);
-          editorState.setDocument(doc);
-        } catch (err: any) {
-          toast.show({ message: err.toString(), type: "error" });
-        }
+        await openPdf(file.path || file.name);
       }
     });
   }
@@ -89,6 +64,27 @@ function updateStatusBar() {
   }
 }
 
+async function revealWindow() {
+  await Promise.allSettled([
+    document.fonts.load('600 42px "Lora Variable"'),
+    document.fonts.load('600 13px "Manrope Variable"'),
+  ]);
+  document.documentElement.removeAttribute("data-starting");
+
+  if (isTauri()) {
+    const window = getCurrentWindow();
+    let appliedTheme: typeof editorState.theme | undefined;
+    const syncTheme = async () => {
+      if (appliedTheme === editorState.theme) return;
+      appliedTheme = editorState.theme;
+      await window.setTheme(appliedTheme).catch(console.warn);
+    };
+    editorState.subscribe(() => void syncTheme());
+    await syncTheme();
+    await window.show();
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   toast.init();
 
@@ -106,8 +102,18 @@ document.addEventListener("DOMContentLoaded", () => {
   new EmptyStateView(emptyStateEl);
   new CommandPaletteView();
 
+  const loading = document.getElementById("document-loading")!;
+  const shell = document.getElementById("app-root")!;
+  editorState.subscribe(() => {
+    const file = editorState.openingFile;
+    loading.hidden = !file;
+    shell.inert = Boolean(file);
+    loading.querySelector("p")!.textContent = file ? `Opening ${file}?` : "";
+  });
+
   setupWindowDragDrop();
 
   editorState.subscribe(updateStatusBar);
   updateStatusBar();
+  void revealWindow().catch(console.error);
 });

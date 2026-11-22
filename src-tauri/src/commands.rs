@@ -31,6 +31,7 @@ pub struct AppState {
     pub current_path: Option<PathBuf>,
     pub cmd_mgr: CommandManager,
     pub renderer: Option<PdfRenderer>,
+    render_source: Option<(u64, Vec<u8>)>,
 }
 
 impl AppState {
@@ -40,6 +41,14 @@ impl AppState {
             current_path: None,
             cmd_mgr: CommandManager::new(),
             renderer: PdfRenderer::new().ok(),
+            render_source: None,
+        }
+    }
+
+    fn invalidate_render_source(&mut self) {
+        self.render_source = None;
+        if let Some(renderer) = &self.renderer {
+            renderer.clear_cache();
         }
     }
 
@@ -110,51 +119,62 @@ impl Default for AppState {
 }
 
 #[tauri::command]
-pub fn open_document(
+pub async fn open_document(
     path: String,
     _password: Option<String>,
     state: State<'_, SharedState>,
 ) -> Result<DocumentDto, String> {
-    let p = PathBuf::from(&path);
-    if !p.exists() {
-        return Err(format!("File does not exist: {}", path));
-    }
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = PathBuf::from(&path);
+        if !p.exists() {
+            return Err(format!("File does not exist: {}", path));
+        }
 
-    let doc = DocumentState::from_file(&p).map_err(|e| e.to_string())?;
-    let file_size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-    let metadata = doc.get_metadata(file_size);
+        let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+        let doc = DocumentState::from_bytes(&bytes).map_err(|e| e.to_string())?;
+        let metadata = doc.get_metadata(bytes.len() as u64);
 
-    let mut pages = Vec::new();
-    for i in 0..doc.page_count() {
-        pages.push(doc.get_page_info(i).map_err(|e| e.to_string())?);
-    }
+        let mut pages = Vec::new();
+        for i in 0..doc.page_count() {
+            pages.push(doc.get_page_info(i).map_err(|e| e.to_string())?);
+        }
 
-    let file_name = p
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("document.pdf")
-        .to_string();
+        let file_name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("document.pdf")
+            .to_string();
 
-    let mut lock = state.lock();
-    lock.doc = Some(doc);
-    lock.current_path = Some(p);
-    lock.cmd_mgr = CommandManager::new();
+        let mut lock = state.lock();
+        lock.doc = Some(doc);
+        lock.current_path = Some(p);
+        lock.cmd_mgr = CommandManager::new();
 
-    if lock.renderer.is_none() {
-        lock.renderer = PdfRenderer::new().ok();
-    }
+        if lock.renderer.is_none() {
+            lock.renderer = PdfRenderer::new().ok();
+        }
 
-    Ok(DocumentDto {
-        file_path: Some(path),
-        file_name,
-        page_count: pages.len(),
-        pages,
-        metadata,
-        can_undo: false,
-        can_redo: false,
-        is_dirty: false,
-        revision_id: lock.cmd_mgr.revision_id(),
+        let revision = lock.cmd_mgr.revision_id();
+        lock.render_source = Some((revision, bytes));
+        if let Some(renderer) = &lock.renderer {
+            renderer.clear_cache();
+        }
+
+        Ok(DocumentDto {
+            file_path: Some(path),
+            file_name,
+            page_count: pages.len(),
+            pages,
+            metadata,
+            can_undo: false,
+            can_redo: false,
+            is_dirty: false,
+            revision_id: lock.cmd_mgr.revision_id(),
+        })
     })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -170,6 +190,8 @@ pub fn new_document(state: State<'_, SharedState>) -> Result<DocumentDto, String
     if lock.renderer.is_none() {
         lock.renderer = PdfRenderer::new().ok();
     }
+
+    lock.invalidate_render_source();
 
     Ok(DocumentDto {
         file_path: None,
@@ -188,30 +210,29 @@ pub fn new_document(state: State<'_, SharedState>) -> Result<DocumentDto, String
 }
 
 #[tauri::command]
-pub fn render_page(
+pub async fn render_page(
     page_index: usize,
     target_width: u32,
     state: State<'_, SharedState>,
 ) -> Result<String, String> {
-    let lock = state.lock();
-    let doc = lock.doc.as_ref().ok_or("No document open")?;
-    let renderer = lock.renderer.as_ref().ok_or("Renderer not initialized")?;
-
-    let mut clone_doc = doc.clone();
-    let pdf_bytes = clone_doc.to_bytes().map_err(|e| e.to_string())?;
-
-    let png_bytes = renderer
-        .render_page_cached(
-            &pdf_bytes,
-            page_index,
-            target_width,
-            lock.cmd_mgr.revision_id(),
-            None,
-        )
-        .map_err(|e| e.to_string())?;
-
-    let b64 = BASE64.encode(&png_bytes);
-    Ok(format!("data:image/png;base64,{}", b64))
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut lock = state.lock();
+        let revision = lock.cmd_mgr.revision_id();
+        if lock.render_source.as_ref().map(|(id, _)| *id) != Some(revision) {
+            let mut doc = lock.doc.as_ref().ok_or("No document open")?.clone();
+            let bytes = doc.to_bytes().map_err(|e| e.to_string())?;
+            lock.render_source = Some((revision, bytes));
+        }
+        let (_, bytes) = lock.render_source.as_ref().ok_or("No document open")?;
+        let renderer = lock.renderer.as_ref().ok_or("Renderer not initialized")?;
+        let png = renderer
+            .render_page_cached(bytes, page_index, target_width, revision, None)
+            .map_err(|e| e.to_string())?;
+        Ok(format!("data:image/png;base64,{}", BASE64.encode(png)))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -255,17 +276,26 @@ pub fn crop_pages(
     state: State<'_, SharedState>,
 ) -> Result<DocumentDto, String> {
     let mut lock = state.lock();
-    let mut previous_boxes = Vec::new();
-    {
-        let doc = lock.doc.as_ref().ok_or("No document open")?;
-        for &p in &pages {
-            previous_boxes.push(doc.get_page_info(p).map_err(|e| e.to_string())?.crop_box);
-        }
+    let doc = lock.doc.as_ref().ok_or("No document open")?;
+    let mut previous_boxes = Vec::with_capacity(pages.len());
+    let mut new_boxes = Vec::with_capacity(pages.len());
+    for &index in &pages {
+        let page = doc
+            .get_page_info(index)
+            .map_err(|error| error.to_string())?;
+        previous_boxes.push(page.crop_box);
+        let new_box = crop_box
+            .map(|crop| {
+                page.viewport_crop(crop)
+                    .ok_or_else(|| format!("Crop is outside page {}", index + 1))
+            })
+            .transpose()?;
+        new_boxes.push(new_box);
     }
     let cmd = Box::new(CropPagesCommand {
         pages,
         previous_boxes,
-        new_box: crop_box,
+        new_boxes,
     });
     lock.execute_cmd(cmd).map_err(|e| e.to_string())?;
     lock.to_dto()
@@ -312,6 +342,7 @@ pub fn duplicate_pages(
     let mut lock = state.lock();
     let doc = lock.doc.as_mut().ok_or("No document open")?;
     doc.duplicate_pages(&pages).map_err(|e| e.to_string())?;
+    lock.invalidate_render_source();
     lock.to_dto()
 }
 
@@ -379,6 +410,7 @@ pub fn cover_erase(
     let mut lock = state.lock();
     let doc = lock.doc.as_mut().ok_or("No document open")?;
     apply_cover_erase(doc, page_index, rect, &color).map_err(|e| e.to_string())?;
+    lock.invalidate_render_source();
     lock.to_dto()
 }
 
@@ -392,6 +424,7 @@ pub fn true_redact(
     let mut lock = state.lock();
     let doc = lock.doc.as_mut().ok_or("No document open")?;
     apply_true_redact(doc, page_index, rect, text.as_deref()).map_err(|e| e.to_string())?;
+    lock.invalidate_render_source();
     lock.to_dto()
 }
 

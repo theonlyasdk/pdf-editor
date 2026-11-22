@@ -81,7 +81,7 @@ fn test_page_operations_and_invertibility() {
     let crop_cmd = Box::new(CropPagesCommand {
         pages: vec![0],
         previous_boxes: vec![None],
-        new_box: Some(PageBox::new(50.0, 50.0, 500.0, 700.0)),
+        new_boxes: vec![Some(PageBox::new(50.0, 50.0, 500.0, 700.0))],
     });
     cmd_mgr.execute(&mut doc, crop_cmd).unwrap();
     assert_eq!(
@@ -238,4 +238,34 @@ fn test_pdfium_rendering_and_roundtrip() {
         .unwrap();
     assert!(!reopened_png.is_empty());
     assert_eq!(&reopened_png[0..4], &[0x89, b'P', b'N', b'G']);
+}
+
+#[test]
+fn crop_coordinates_use_the_visible_page_and_pdf_rotation() {
+    use pdf_core::types::{PageBox, PageInfo};
+
+    let visible = PageBox::new(40.0, 70.0, 500.0, 600.0);
+    for (rotation, width, height, expected) in [
+        (0, 500.0, 600.0, PageBox::new(50.0, 610.0, 30.0, 40.0)),
+        (90, 600.0, 500.0, PageBox::new(60.0, 80.0, 40.0, 30.0)),
+        (180, 500.0, 600.0, PageBox::new(500.0, 90.0, 30.0, 40.0)),
+        (270, 600.0, 500.0, PageBox::new(480.0, 630.0, 40.0, 30.0)),
+    ] {
+        let page = PageInfo {
+            index: 0,
+            rotation,
+            width,
+            height,
+            media_box: PageBox::new(10.0, 20.0, 612.0, 792.0),
+            crop_box: Some(visible),
+        };
+        assert_eq!(
+            page.viewport_crop(PageBox::new(0.0, 0.0, width, height)),
+            Some(visible)
+        );
+        assert_eq!(
+            page.viewport_crop(PageBox::new(10.0, 20.0, 30.0, 40.0)),
+            Some(expected)
+        );
+    }
 }
