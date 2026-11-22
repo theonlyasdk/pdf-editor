@@ -60,12 +60,14 @@ class ToastManager {
   }
 
   private dismiss(toast: HTMLElement) {
-    if (toast.parentElement) {
-      toast.style.opacity = "0";
-      toast.style.transform = "translateY(10px)";
-      toast.style.transition = "all 200ms ease-out";
-      setTimeout(() => toast.remove(), 200);
+    if (!toast.isConnected || toast.classList.contains("is-dismissing")) return;
+    toast.classList.add("is-dismissing");
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      toast.remove();
+      return;
     }
+    toast.addEventListener("transitionend", () => toast.remove(), { once: true });
+    setTimeout(() => toast.remove(), 150);
   }
 }
 

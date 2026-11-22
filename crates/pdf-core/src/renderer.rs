@@ -149,28 +149,28 @@ impl PdfRenderer {
             .map_err(|e| CoreError::Pdfium(e.to_string()))?;
 
         let mut results = Vec::new();
-        let query_normalized = if case_sensitive {
-            query.to_string()
-        } else {
-            query.to_lowercase()
-        };
-
-        for (idx, page) in doc.pages().iter().enumerate() {
-            if let Ok(text_page) = page.text() {
-                let page_text = text_page.all();
-                let text_to_check = if case_sensitive {
-                    page_text.clone()
-                } else {
-                    page_text.to_lowercase()
-                };
-
-                if text_to_check.contains(&query_normalized) {
-                    results.push(SearchResult {
-                        page_index: idx,
-                        match_text: query.to_string(),
-                        bounding_boxes: vec![PageBox::new(50.0, 50.0, 200.0, 20.0)],
-                    });
+        let options = PdfSearchOptions::new().match_case(case_sensitive);
+        for (page_index, page) in doc.pages().iter().enumerate() {
+            let Ok(text) = page.text() else { continue };
+            let Ok(search) = text.search(query, &options) else {
+                continue;
+            };
+            for found in search.iter(PdfSearchDirection::SearchForward) {
+                let mut bounding_boxes = Vec::new();
+                for segment in found.iter() {
+                    let rect = segment.bounds();
+                    bounding_boxes.push(PageBox::new(
+                        f64::from(rect.left().value),
+                        f64::from(rect.bottom().value),
+                        f64::from(rect.width().value),
+                        f64::from(rect.height().value),
+                    ));
                 }
+                results.push(SearchResult {
+                    page_index,
+                    match_text: query.to_owned(),
+                    bounding_boxes,
+                });
             }
         }
 

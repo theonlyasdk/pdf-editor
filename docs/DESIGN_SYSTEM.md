@@ -36,6 +36,10 @@ Keep focus indicators visible in both themes and preserve keyboard operation whe
 
 Show the file name while the document opens. Keep page and thumbnail placeholders at the final aspect ratio. Use the shared page raster queue for viewport-prioritized loading and provide a retry when a page fails. While a visible page is pending, animate only the shimmer transform. Keep a static placeholder under reduced motion.
 
+## Editor interactions
+
+Use the light and dark scrollbar tokens for scrollable panels. Keep crop handles and canvas pan tied directly to the pointer. Grid view uses a shared camera transform so zooming keeps the page under the cursor and reuses existing page images. Use short fades for loading and status changes, and disable motion when the system requests reduced motion. Keep the current page image and any pending edit preview visible until the replacement raster is decoded. Follow the viewport in the thumbnail rail while preserving explicit multi-page selections. Tool and page context menus support keyboard navigation.
+
 ## Startup and theme
 
 The head of `index.html` resolves `pdf_editor_theme` before the stylesheet paints, falling back to the OS color scheme. Its critical background colors must match the `background` tokens. Tauri starts hidden with a dark backing color. The frontend mounts the editor, loads the local heading and body fonts, and reveals the native window after applying the resolved theme. When modifying startup, verify a fresh profile and persisted light and dark preferences, including restarts and an offline launch.

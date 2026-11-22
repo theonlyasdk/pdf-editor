@@ -88,23 +88,25 @@ pub fn apply_true_redact(
         scrubbed_operations.push(op);
     }
 
-    // Step 3: Inject solid black blackout rectangle
-    scrubbed_operations.push(Operation::new("q", vec![]));
-    scrubbed_operations.push(Operation::new(
-        "rg",
-        vec![0.0.into(), 0.0.into(), 0.0.into()],
-    ));
-    scrubbed_operations.push(Operation::new(
-        "re",
-        vec![
-            box_rect.x.into(),
-            box_rect.y.into(),
-            box_rect.width.into(),
-            box_rect.height.into(),
-        ],
-    ));
-    scrubbed_operations.push(Operation::new("f", vec![]));
-    scrubbed_operations.push(Operation::new("Q", vec![]));
+    // A text-only removal has no rectangle to cover.
+    if box_rect.width > 0.0 && box_rect.height > 0.0 {
+        scrubbed_operations.push(Operation::new("q", vec![]));
+        scrubbed_operations.push(Operation::new(
+            "rg",
+            vec![0.0.into(), 0.0.into(), 0.0.into()],
+        ));
+        scrubbed_operations.push(Operation::new(
+            "re",
+            vec![
+                box_rect.x.into(),
+                box_rect.y.into(),
+                box_rect.width.into(),
+                box_rect.height.into(),
+            ],
+        ));
+        scrubbed_operations.push(Operation::new("f", vec![]));
+        scrubbed_operations.push(Operation::new("Q", vec![]));
+    }
 
     // Step 4: Re-encode and replace page content stream
     let new_content = Content {

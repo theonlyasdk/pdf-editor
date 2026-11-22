@@ -5,6 +5,7 @@ pub mod persistence;
 pub mod range_parser;
 pub mod redaction;
 pub mod renderer;
+pub mod resize_crop;
 pub mod types;
 
 pub use document::{CoreError, DocumentState};

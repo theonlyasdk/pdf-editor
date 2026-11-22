@@ -59,6 +59,8 @@ export interface AnnotationDto {
   stroke_width: number;
   opacity: number;
   text?: string | null;
+  font_size?: number;
+  font_family?: string;
   points?: Array<Array<{ x: number; y: number }>> | null;
   author?: string | null;
   modified_date?: string | null;
@@ -75,6 +77,7 @@ export interface DocumentDto {
   can_redo: bool;
   is_dirty: bool;
   revision_id: number;
+  annotations?: AnnotationDto[];
 }
 type bool = boolean;
 

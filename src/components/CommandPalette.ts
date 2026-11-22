@@ -166,6 +166,13 @@ export class CommandPaletteView {
         action: () => editorState.setViewMode("grid"),
       },
       {
+        id: "find-text",
+        label: "Find in document",
+        category: "View",
+        shortcut: "Ctrl+F",
+        action: () => { window.dispatchEvent(new Event("open-document-search")); },
+      },
+      {
         id: "zoom-in",
         category: "View",
         label: "Zoom In",
@@ -203,7 +210,7 @@ export class CommandPaletteView {
           if (!isDoc) return;
           const p = editorState.selectedPages.size > 0 ? Array.from(editorState.selectedPages) : [editorState.currentPage];
           const doc = await Backend.rotatePages(p, 90);
-          editorState.setDocument(doc);
+          editorState.updateDocument(doc);
         },
       },
       {
@@ -214,7 +221,7 @@ export class CommandPaletteView {
           if (!isDoc) return;
           const p = editorState.selectedPages.size > 0 ? Array.from(editorState.selectedPages) : [editorState.currentPage];
           const doc = await Backend.rotatePages(p, -90);
-          editorState.setDocument(doc);
+          editorState.updateDocument(doc);
         },
       },
       {
@@ -224,7 +231,7 @@ export class CommandPaletteView {
         action: async () => {
           if (!isDoc) return;
           const doc = await Backend.insertBlankPage(editorState.currentPage + 1, 612.0, 792.0);
-          editorState.setDocument(doc);
+          editorState.updateDocument(doc);
         },
       },
       {
@@ -235,7 +242,7 @@ export class CommandPaletteView {
           if (!isDoc) return;
           const pages = editorState.selectedPages.size > 0 ? Array.from(editorState.selectedPages) : [editorState.currentPage];
           const doc = await Backend.deletePages(pages);
-          editorState.setDocument(doc);
+          editorState.updateDocument(doc);
         },
       },
 

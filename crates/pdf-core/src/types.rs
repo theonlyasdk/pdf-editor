@@ -70,6 +70,43 @@ pub struct PageInfo {
 }
 
 impl PageInfo {
+    pub fn viewport_point(&self, x: f64, y: f64) -> Point2D {
+        let visible = self
+            .crop_box
+            .and_then(|rect| rect.intersection(&self.media_box))
+            .unwrap_or(self.media_box);
+        let (x, y) = match self.rotation.rem_euclid(360) {
+            90 => (y, x),
+            180 => (visible.width - x, y),
+            270 => (visible.width - y, visible.height - x),
+            _ => (x, visible.height - y),
+        };
+        Point2D {
+            x: visible.x + x,
+            y: visible.y + y,
+        }
+    }
+
+    pub fn pdf_rect_to_viewport(&self, rect: PageBox) -> PageBox {
+        let visible = self
+            .crop_box
+            .and_then(|rect| rect.intersection(&self.media_box))
+            .unwrap_or(self.media_box);
+        let x = rect.x - visible.x;
+        let y = rect.y - visible.y;
+        match self.rotation.rem_euclid(360) {
+            90 => PageBox::new(y, x, rect.height, rect.width),
+            180 => PageBox::new(visible.width - x - rect.width, y, rect.width, rect.height),
+            270 => PageBox::new(
+                visible.height - y - rect.height,
+                visible.width - x - rect.width,
+                rect.height,
+                rect.width,
+            ),
+            _ => PageBox::new(x, visible.height - y - rect.height, rect.width, rect.height),
+        }
+    }
+
     /// Converts a top-left viewport crop into a bottom-left PDF page rectangle.
     pub fn viewport_crop(&self, crop: PageBox) -> Option<PageBox> {
         let crop = crop.intersection(&PageBox::new(0.0, 0.0, self.width, self.height))?;
@@ -150,6 +187,10 @@ pub struct AnnotationDto {
     pub stroke_width: f64,
     pub opacity: f64,
     pub text: Option<String>,
+    #[serde(default)]
+    pub font_size: Option<f64>,
+    #[serde(default)]
+    pub font_family: Option<String>,
     pub points: Option<Vec<Vec<Point2D>>>, // for ink or lines/polygons
     pub author: Option<String>,
     pub modified_date: Option<String>,

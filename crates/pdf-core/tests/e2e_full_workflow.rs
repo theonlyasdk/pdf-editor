@@ -73,6 +73,8 @@ fn test_end_to_end_full_user_workflow() {
         stroke_width: 3.0,
         opacity: 1.0,
         text: None,
+        font_size: None,
+        font_family: None,
         points: Some(vec![vec![
             Point2D { x: 100.0, y: 100.0 },
             Point2D { x: 200.0, y: 150.0 },
@@ -103,6 +105,8 @@ fn test_end_to_end_full_user_workflow() {
         stroke_width: 1.0,
         opacity: 1.0,
         text: Some("CONFIDENTIAL REVIEW COMPLETE".into()),
+        font_size: None,
+        font_family: None,
         points: None,
         author: Some("Lead Editor".into()),
         modified_date: None,

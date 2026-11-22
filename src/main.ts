@@ -1,3 +1,4 @@
+import { DocumentSearchView } from "./components/DocumentSearch";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CanvasViewportView } from "./components/CanvasView";
@@ -101,6 +102,7 @@ document.addEventListener("DOMContentLoaded", () => {
   new PropertiesPanelView(propertiesEl);
   new EmptyStateView(emptyStateEl);
   new CommandPaletteView();
+  new DocumentSearchView();
 
   const loading = document.getElementById("document-loading")!;
   const shell = document.getElementById("app-root")!;

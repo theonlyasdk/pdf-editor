@@ -221,6 +221,8 @@ fn test_pdfium_rendering_and_roundtrip() {
         stroke_width: 1.0,
         opacity: 0.5,
         text: Some("Roundtrip highlight".to_string()),
+        font_size: None,
+        font_family: None,
         points: None,
         author: Some("Tester".to_string()),
         modified_date: None,
@@ -268,4 +270,71 @@ fn crop_coordinates_use_the_visible_page_and_pdf_rotation() {
             Some(expected)
         );
     }
+}
+
+#[test]
+fn fixed_crop_scales_contents_and_annotations_without_changing_page_size() {
+    use lopdf::{dictionary, Object};
+    use pdf_core::resize_crop::ResizeCropPages;
+
+    let mut doc = DocumentState::new_blank(100.0, 200.0).unwrap();
+    let id = doc.get_page_id(0).unwrap();
+    doc.doc
+        .add_page_contents(id, b"10 30 10 10 re f".to_vec())
+        .unwrap();
+    let annotation = doc.doc.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Link",
+        "Rect" => vec![30.into(), 60.into(), 40.into(), 70.into()],
+    });
+    doc.doc
+        .get_dictionary_mut(id)
+        .unwrap()
+        .set("Annots", vec![Object::Reference(annotation)]);
+    let original = doc.doc.get_page_content(id);
+    let mut commands = CommandManager::new();
+    let crop = PageBox::new(25.0, 50.0, 50.0, 100.0);
+    commands
+        .execute(&mut doc, Box::new(ResizeCropPages::new(vec![(0, crop)])))
+        .unwrap();
+
+    let page = doc.get_page_info(0).unwrap();
+    assert_eq!(
+        (page.width, page.height, page.crop_box),
+        (100.0, 200.0, None)
+    );
+    let content = doc.doc.get_page_content(id);
+    let operations = lopdf::content::Content::decode(&content)
+        .unwrap()
+        .operations;
+    let operands = |name: &str| {
+        operations
+            .iter()
+            .find(|op| op.operator == name)
+            .unwrap()
+            .operands
+            .iter()
+            .map(|value| value.as_float().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(operands("cm"), vec![2.0, 0.0, 0.0, 2.0, -50.0, -100.0]);
+    assert_eq!(operands("re"), vec![0.0, 0.0, 100.0, 200.0]);
+    let rect = || {
+        doc.doc
+            .get_dictionary(annotation)
+            .unwrap()
+            .get(b"Rect")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|val| val.as_float().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rect(), vec![10.0, 20.0, 30.0, 40.0]);
+
+    commands.undo(&mut doc).unwrap();
+    assert_eq!(doc.doc.get_page_content(id), original);
+    commands.redo(&mut doc).unwrap();
+    assert_eq!(doc.doc.get_page_content(id), content);
 }

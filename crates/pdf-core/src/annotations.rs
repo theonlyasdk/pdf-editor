@@ -1,5 +1,5 @@
 use crate::document::{CoreError, DocumentState};
-use crate::types::{AnnotationDto, AnnotationType};
+use crate::types::{AnnotationDto, AnnotationType, PageBox};
 use lopdf::content::{Content, Operation};
 use lopdf::{dictionary, Object, Stream};
 
@@ -18,14 +18,17 @@ pub fn commit_annotations_to_pdf(doc_state: &mut DocumentState) -> Result<(), Co
             annot_refs.push(Object::Reference(annot_obj_id));
         }
 
+        let mut existing = doc_state
+            .doc
+            .get_dictionary(page_id)?
+            .get_deref(b"Annots", &doc_state.doc)
+            .ok()
+            .and_then(|value| value.as_array().ok())
+            .cloned()
+            .unwrap_or_default();
+        existing.extend(annot_refs);
         let page_dict = doc_state.doc.get_dictionary_mut(page_id)?;
-        if let Ok(existing_annots) = page_dict.get_mut(b"Annots") {
-            if let Ok(arr) = existing_annots.as_array_mut() {
-                arr.extend(annot_refs);
-            }
-        } else {
-            page_dict.set("Annots", annot_refs);
-        }
+        page_dict.set("Annots", existing);
     }
     Ok(())
 }
@@ -72,7 +75,9 @@ fn create_pdf_annotation(
     let mut dict = dictionary! {
         "Type" => "Annot",
         "Subtype" => subtype_str,
-        "Rect" => rect_arr.clone(),
+        "Rect" => rect_arr,
+        "NM" => Object::string_literal(annot.id.as_str()),
+        "F" => 4,
         "C" => vec![r.into(), g.into(), b.into()],
         "CA" => Object::Real(annot.opacity as f32),
         "ca" => Object::Real(annot.opacity as f32),
@@ -85,6 +90,68 @@ fn create_pdf_annotation(
         dict.set("T", Object::string_literal(author.as_str()));
     }
 
+    let points = |line: &[crate::types::Point2D]| {
+        line.iter()
+            .flat_map(|point| [Object::from(point.x), Object::from(point.y)])
+            .collect::<Vec<_>>()
+    };
+    match annot.annot_type {
+        AnnotationType::Ink => {
+            if let Some(lines) = &annot.points {
+                dict.set(
+                    "InkList",
+                    lines
+                        .iter()
+                        .map(|line| Object::Array(points(line)))
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        AnnotationType::Line | AnnotationType::Arrow => {
+            if let Some(line) = annot.points.as_ref().and_then(|lines| lines.first()) {
+                dict.set("L", points(line));
+            }
+            if annot.annot_type == AnnotationType::Arrow {
+                dict.set(
+                    "LE",
+                    vec![
+                        Object::Name(b"None".to_vec()),
+                        Object::Name(b"OpenArrow".to_vec()),
+                    ],
+                );
+            }
+        }
+        AnnotationType::Highlight
+        | AnnotationType::Underline
+        | AnnotationType::StrikeOut
+        | AnnotationType::Squiggly => {
+            let PageBox {
+                x,
+                y,
+                width,
+                height,
+            } = annot.rect;
+            dict.set(
+                "QuadPoints",
+                vec![
+                    x.into(),
+                    (y + height).into(),
+                    (x + width).into(),
+                    (y + height).into(),
+                    x.into(),
+                    y.into(),
+                    (x + width).into(),
+                    y.into(),
+                ],
+            );
+        }
+        AnnotationType::StickyNote => {
+            dict.set("Name", Object::Name(b"Note".to_vec()));
+            return Ok(doc.add_object(dict));
+        }
+        _ => {}
+    }
+
     // Generate Appearance Stream (/AP << /N stream >>)
     let ap_stream_bytes = generate_appearance_stream(annot, r, g, b);
     let ap_stream_id = doc.add_object(Stream::new(
@@ -92,6 +159,10 @@ fn create_pdf_annotation(
             "Type" => "XObject",
             "Subtype" => "Form",
             "BBox" => vec![0.into(), 0.into(), annot.rect.width.into(), annot.rect.height.into()],
+            "Resources" => dictionary! {
+                "Font" => dictionary! { "F0" => dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => annot.font_family.as_deref().unwrap_or("Helvetica"), "Encoding" => "WinAnsiEncoding" } },
+                "ExtGState" => dictionary! { "Opacity" => dictionary! { "Type" => "ExtGState", "CA" => Object::Real(annot.opacity as f32), "ca" => Object::Real(annot.opacity as f32) } }
+            },
         },
         ap_stream_bytes,
     ));
@@ -114,6 +185,9 @@ fn generate_appearance_stream(annot: &AnnotationDto, r: f64, g: f64, b: f64) -> 
         Operation::new("RG", vec![r.into(), g.into(), b.into()]),
         Operation::new("rg", vec![r.into(), g.into(), b.into()]),
         Operation::new("w", vec![stroke.into()]),
+        Operation::new("J", vec![1.into()]),
+        Operation::new("j", vec![1.into()]),
+        Operation::new("gs", vec!["Opacity".into()]),
     ];
 
     match annot.annot_type {
@@ -141,9 +215,78 @@ fn generate_appearance_stream(annot: &AnnotationDto, r: f64, g: f64, b: f64) -> 
             ));
             ops.push(Operation::new("f", vec![]));
         }
+        AnnotationType::Circle => {
+            let cx = w / 2.0;
+            let cy = h / 2.0;
+            let rx = (cx - stroke / 2.0).max(0.0);
+            let ry = (cy - stroke / 2.0).max(0.0);
+            let kx = rx * 0.552_284_75;
+            let ky = ry * 0.552_284_75;
+            ops.push(Operation::new("m", vec![(cx + rx).into(), cy.into()]));
+            for curve in [
+                [cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry],
+                [cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy],
+                [cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry],
+                [cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy],
+            ] {
+                ops.push(Operation::new(
+                    "c",
+                    curve.into_iter().map(Object::from).collect(),
+                ));
+            }
+            if let Some(fill) = &annot.fill_color {
+                let (r, g, b) = hex_to_rgb(fill);
+                ops.push(Operation::new("rg", vec![r.into(), g.into(), b.into()]));
+                ops.push(Operation::new("B", vec![]));
+            } else {
+                ops.push(Operation::new("S", vec![]));
+            }
+        }
+        AnnotationType::Underline | AnnotationType::StrikeOut | AnnotationType::Squiggly => {
+            let y = if annot.annot_type == AnnotationType::StrikeOut {
+                h / 2.0
+            } else {
+                stroke / 2.0
+            };
+            ops.push(Operation::new("m", vec![0.into(), y.into()]));
+            if annot.annot_type == AnnotationType::Squiggly {
+                let steps = (w / 3.0).ceil().clamp(1.0, 500.0) as usize;
+                for step in 1..=steps {
+                    let y = if step % 2 == 0 { y } else { (y + 2.0).min(h) };
+                    ops.push(Operation::new(
+                        "l",
+                        vec![(w * step as f64 / steps as f64).into(), y.into()],
+                    ));
+                }
+            } else {
+                ops.push(Operation::new("l", vec![w.into(), y.into()]));
+            }
+            ops.push(Operation::new("S", vec![]));
+        }
         AnnotationType::Line | AnnotationType::Arrow => {
-            ops.push(Operation::new("m", vec![0.into(), 0.into()]));
-            ops.push(Operation::new("l", vec![w.into(), h.into()]));
+            let line = annot.points.as_ref().and_then(|lines| lines.first());
+            let first = line
+                .and_then(|points| points.first())
+                .map_or((0.0, 0.0), |p| (p.x - annot.rect.x, p.y - annot.rect.y));
+            let end = line
+                .and_then(|points| points.last())
+                .map_or((w, h), |p| (p.x - annot.rect.x, p.y - annot.rect.y));
+            ops.push(Operation::new("m", vec![first.0.into(), first.1.into()]));
+            ops.push(Operation::new("l", vec![end.0.into(), end.1.into()]));
+            if annot.annot_type == AnnotationType::Arrow {
+                let angle = (end.1 - first.1).atan2(end.0 - first.0);
+                let length = 12.0_f64.min((end.0 - first.0).hypot(end.1 - first.1) / 2.0);
+                for offset in [-0.5, 0.5] {
+                    ops.push(Operation::new("m", vec![end.0.into(), end.1.into()]));
+                    ops.push(Operation::new(
+                        "l",
+                        vec![
+                            (end.0 - length * (angle + offset).cos()).into(),
+                            (end.1 - length * (angle + offset).sin()).into(),
+                        ],
+                    ));
+                }
+            }
             ops.push(Operation::new("S", vec![]));
         }
         AnnotationType::Ink => {
@@ -163,18 +306,33 @@ fn generate_appearance_stream(annot: &AnnotationDto, r: f64, g: f64, b: f64) -> 
                 }
             }
         }
-        AnnotationType::FreeText => {
+        AnnotationType::FreeText | AnnotationType::Stamp => {
+            let size = annot.font_size.unwrap_or(12.0);
+            if annot.annot_type == AnnotationType::Stamp {
+                ops.push(Operation::new(
+                    "re",
+                    vec![
+                        stroke.into(),
+                        stroke.into(),
+                        (w - stroke * 2.0).max(0.0).into(),
+                        (h - stroke * 2.0).max(0.0).into(),
+                    ],
+                ));
+                ops.push(Operation::new("S", vec![]));
+            }
             if let Some(ref text) = annot.text {
                 ops.push(Operation::new("BT", vec![]));
-                ops.push(Operation::new("Tf", vec!["Helvetica".into(), 12.into()]));
+                ops.push(Operation::new("Tf", vec!["F0".into(), size.into()]));
                 ops.push(Operation::new(
                     "Td",
-                    vec![4.into(), (h - 14.0).max(4.0).into()],
+                    vec![4.into(), (h - size - 4.0).max(4.0).into()],
                 ));
-                ops.push(Operation::new(
-                    "Tj",
-                    vec![Object::string_literal(text.as_str())],
-                ));
+                for (index, line) in text.lines().enumerate() {
+                    if index > 0 {
+                        ops.push(Operation::new("Td", vec![0.into(), (-size * 1.2).into()]));
+                    }
+                    ops.push(Operation::new("Tj", vec![Object::string_literal(line)]));
+                }
                 ops.push(Operation::new("ET", vec![]));
             }
         }

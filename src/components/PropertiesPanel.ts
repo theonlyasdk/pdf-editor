@@ -1,5 +1,3 @@
-import { Wrench } from "lucide";
-import { icon } from "./ui/icon";
 import { STRINGS } from "../i18n/strings";
 import { Backend } from "../ipc/backend";
 import { editorState } from "../state/editorState";
@@ -134,20 +132,14 @@ export class PropertiesPanelView {
       `;
     } else if (tool === "trueRedact") {
       bodyHtml = `
-        <div class="property-group">
-          <div class="ui-alert ui-alert--destructive py-2 px-3 text-xs mb-2">
-            <strong>${STRINGS.redaction.title}</strong>
-            <p class="mb-0 mt-1" style="font-size: 11px;">${STRINGS.redaction.warning}</p>
-          </div>
-          <label class="property-label">${STRINGS.redaction.targetText}</label>
-          <input type="text" class="ui-input mb-2" id="prop-redact-keyword" placeholder="e.g. SECRET_SSN" />
-          <button class="ui-button ui-button--destructive ui-button--sm w-full" id="btn-apply-text-redact">
-            Scrub Matching Text on Page
+        <form class="property-group" id="redact-text-form">
+          <label class="property-label" for="prop-redact-keyword">${STRINGS.redaction.targetText}</label>
+          <input type="text" class="ui-input" id="prop-redact-keyword" placeholder="Enter a word or phrase" required />
+          <button type="submit" class="ui-button ui-button--outline ui-button--sm text-destructive" id="btn-apply-text-redact">
+            ${STRINGS.redaction.applyRedact}
           </button>
-          <p class="text-xs text-muted-foreground mt-2" style="font-size: 11px;">
-            Or drag a red bounding box directly over any content on the page to permanently excise it.
-          </p>
-        </div>
+          <p class="text-xs text-muted-foreground">${STRINGS.redaction.warning}</p>
+        </form>
       `;
     } else if (tool === "crop") {
       const page = editorState.doc?.pages[editorState.currentPage] || { width: 612, height: 792, index: 0 };
@@ -168,14 +160,14 @@ export class PropertiesPanelView {
             </span>
           </div>
           <select class="ui-input" id="prop-crop-ratio">
-            <option value="free" ${ratioMode === "free" ? "selected" : ""}>Free Ratio (Default)</option>
-            <option value="original" ${ratioMode === "original" ? "selected" : ""}>Original Page Ratio (${(page.width / Math.max(1, page.height)).toFixed(2)})</option>
+            <option value="free" ${ratioMode === "free" ? "selected" : ""}>Free crop</option>
+            <option value="original" ${ratioMode === "original" ? "selected" : ""}>Fixed ? Original page ratio</option>
             <option value="1:1" ${ratioMode === "1:1" ? "selected" : ""}>Square (1:1)</option>
             <option value="4:3" ${ratioMode === "4:3" ? "selected" : ""}>Standard (4:3)</option>
             <option value="16:9" ${ratioMode === "16:9" ? "selected" : ""}>Widescreen (16:9)</option>
           </select>
           <div class="text-muted-foreground text-xs" style="font-size: 11px;">
-            By default free resizing. Hold <kbd>Ctrl</kbd> while dragging handles to lock ratio.
+            Fixed ratios scale the crop to fit the original page size. Hold <kbd>Ctrl</kbd> to lock the ratio while dragging in free mode.
           </div>
         </div>
 
@@ -259,17 +251,14 @@ export class PropertiesPanelView {
       `;
     } else {
       bodyHtml = `
-        <div class="text-center text-muted-foreground my-5">
-          ${icon(Wrench, 24)}
-          <p class="text-xs px-3">${STRINGS.properties.noSelection}</p>
-        </div>
+        <p class="properties-empty">${STRINGS.properties.noSelection}</p>
       `;
     }
 
     this.element.innerHTML = `
       <div class="panel-header">
         <span class="text-xs font-semibold">${STRINGS.properties.title}</span>
-        <span class="ui-badge text-xs capitalize">${tool}</span>
+        ${tool === "select" ? "" : `<span class="ui-badge text-xs capitalize">${STRINGS.tools[tool as keyof typeof STRINGS.tools] ?? tool}</span>`}
       </div>
       <div class="panel-body">
         ${bodyHtml}
@@ -282,7 +271,7 @@ export class PropertiesPanelView {
   private bindPanelEvents() {
     // Stroke Color Picker
     const strokePicker = this.element.querySelector("#prop-stroke-color") as HTMLInputElement | null;
-    strokePicker?.addEventListener("input", () => {
+    strokePicker?.addEventListener("change", () => {
       editorState.updateToolSettings({ strokeColor: strokePicker.value });
     });
 
@@ -300,7 +289,7 @@ export class PropertiesPanelView {
     const strokeSlider = this.element.querySelector("#prop-stroke-width") as HTMLInputElement | null;
     strokeSlider?.addEventListener("input", () => {
       const val = parseInt(strokeSlider.value, 10);
-      editorState.updateToolSettings({ strokeWidth: val });
+      editorState.updateToolSettings({ strokeWidth: val }, false);
       const label = this.element.querySelector("#prop-stroke-val");
       if (label) label.textContent = `${val}px`;
     });
@@ -309,7 +298,7 @@ export class PropertiesPanelView {
     const opacitySlider = this.element.querySelector("#prop-opacity") as HTMLInputElement | null;
     opacitySlider?.addEventListener("input", () => {
       const val = parseFloat(opacitySlider.value);
-      editorState.updateToolSettings({ opacity: val });
+      editorState.updateToolSettings({ opacity: val }, false);
       const label = this.element.querySelector("#prop-opacity-val");
       if (label) label.textContent = `${Math.round(val * 100)}%`;
     });
@@ -325,33 +314,44 @@ export class PropertiesPanelView {
       }
     });
 
-    fillPicker?.addEventListener("input", () => {
+    fillPicker?.addEventListener("change", () => {
       if (fillTransparent) fillTransparent.checked = false;
       editorState.updateToolSettings({ fillColor: fillPicker.value });
     });
 
     // Cover color
     const coverPicker = this.element.querySelector("#prop-cover-color") as HTMLInputElement | null;
-    coverPicker?.addEventListener("input", () => {
+    coverPicker?.addEventListener("change", () => {
       editorState.updateToolSettings({ coverColor: coverPicker.value });
     });
 
-    // True Redact Keyword scrubber
-    const redactKeywordBtn = this.element.querySelector("#btn-apply-text-redact");
-    const redactKeywordInput = this.element.querySelector("#prop-redact-keyword") as HTMLInputElement | null;
-    redactKeywordBtn?.addEventListener("click", async () => {
-      const text = redactKeywordInput?.value.trim();
-      if (!text) {
-        toast.show({ message: "Please enter a phrase to scrub.", type: "warning" });
-        return;
-      }
+    const textSize = this.element.querySelector<HTMLInputElement>("#prop-font-size");
+    textSize?.addEventListener("input", () => {
+      editorState.updateToolSettings({ fontSize: textSize.valueAsNumber }, false);
+      const label = this.element.querySelector("#prop-font-size-val");
+      if (label) label.textContent = `${textSize.value} pt`;
+    });
+    const font = this.element.querySelector<HTMLSelectElement>("#prop-font-family");
+    if (font) {
+      font.value = editorState.toolSettings.fontFamily;
+      font.addEventListener("change", () => editorState.updateToolSettings({ fontFamily: font.value }));
+    }
+
+    const redactForm = this.element.querySelector<HTMLFormElement>("#redact-text-form");
+    redactForm?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const field = redactForm.querySelector<HTMLInputElement>("#prop-redact-keyword")!;
+      const text = field.value.trim();
+      if (!text) return;
+      const button = redactForm.querySelector("button")!;
+      button.disabled = true;
       try {
-        const dummyRect = { x: 0, y: 0, width: 612, height: 792 };
-        const updated = await Backend.trueRedact(editorState.currentPage, dummyRect, text);
-        editorState.setDocument(updated);
-        toast.show({ message: `Scrubbed occurrences of '${text}' from Page ${editorState.currentPage + 1}.`, type: "success" });
-      } catch (err: any) {
-        toast.show({ message: `Redaction failed: ${err}`, type: "error" });
+        const updated = await Backend.redactText(editorState.currentPage, text);
+        editorState.updateDocument(updated);
+        toast.show({ message: "Text removed from the current page.", type: "success" });
+      } catch (error) {
+        button.disabled = false;
+        toast.show({ message: String(error), type: "error" });
       }
     });
 
@@ -491,8 +491,8 @@ export class PropertiesPanelView {
 
       try {
         const page = editorState.currentPage;
-        const updated = await Backend.cropPages(targetPages, editorState.cropBox);
-        editorState.setDocument(updated);
+        const updated = await Backend.cropPages(targetPages, editorState.cropBox, editorState.toolSettings.cropRatioMode !== "free");
+        editorState.updateDocument(updated);
         editorState.setTool("select");
         editorState.setCurrentPage(page);
         toast.show({

@@ -1,5 +1,6 @@
+import { showToolMenu } from "./EditorContextMenu";
 import { pickPdf } from "./OpenPdf";
-import { FileText, FolderOpen, Save, Download, Undo2, Redo2, PanelsTopLeft, RectangleVertical, Columns2, Grid2X2, ZoomOut, ZoomIn, Search, Sun, Moon, MousePointer2, Hand, Highlighter, Underline, Strikethrough, Type, MessageSquare, PenTool, Square, Circle, Slash, ArrowRight, Stamp, Eraser, ShieldAlert, Crop, RotateCcw, RotateCw, Plus, Trash2 } from "lucide";
+import { Brush, FileText, FolderOpen, Save, Download, Undo2, Redo2, PanelsTopLeft, RectangleVertical, Columns2, Grid2X2, ZoomOut, ZoomIn, Search, Sun, Moon, MousePointer2, Hand, Highlighter, Underline, Strikethrough, Type, MessageSquare, PenTool, Square, Circle, Slash, ArrowRight, Stamp, Eraser, ShieldAlert, Crop, RotateCcw, RotateCw, Plus, Trash2 } from "lucide";
 import { icon } from "./ui/icon";
 import { STRINGS } from "../i18n/strings";
 import { Backend } from "../ipc/backend";
@@ -14,6 +15,13 @@ export class ToolbarView {
   constructor(header: HTMLElement, actionToolbar: HTMLElement) {
     this.headerElement = header;
     this.actionToolbarElement = actionToolbar;
+    this.actionToolbarElement.addEventListener("contextmenu", (event) => {
+      const tool = (event.target as Element).closest<HTMLButtonElement>("[data-tool]")?.dataset.tool;
+      if (tool) {
+        editorState.setTool(tool as ToolType);
+        showToolMenu(event);
+      }
+    });
     this.render();
     editorState.subscribe(() => this.render());
   }
@@ -99,6 +107,9 @@ export class ToolbarView {
             ${icon(ZoomIn)}
           </button>
 
+          <button class="ui-button ui-button--tool" id="btn-find-text" title="Find in document (Ctrl+F)">
+            ${icon(Search)} <span>Find</span>
+          </button>
           <div class="tool-separator"></div>
         </div>
 
@@ -163,6 +174,9 @@ export class ToolbarView {
         <button class="ui-button ui-button--tool ${t === "highlight" ? "active" : ""}" data-tool="highlight" title="${STRINGS.tools.highlight} (Shift+H)">
           ${icon(Highlighter)}
         </button>
+        <button class="ui-button ui-button--tool ${t === "highlighter" ? "active" : ""}" data-tool="highlighter" title="${STRINGS.tools.highlighter}">
+          ${icon(Brush)}
+        </button>
         <button class="ui-button ui-button--tool ${t === "underline" ? "active" : ""}" data-tool="underline" title="${STRINGS.tools.underline}">
           ${icon(Underline)}
         </button>
@@ -211,7 +225,7 @@ export class ToolbarView {
         </button>
         <button class="ui-button ui-button--tool text-destructive ${t === "trueRedact" ? "active" : ""}" data-tool="trueRedact" title="${STRINGS.tools.trueRedact}">
           ${icon(ShieldAlert)}
-          <span class="text-xs font-semibold">True Redact</span>
+          <span class="text-xs font-semibold">Redact text</span>
         </button>
 
         <div class="tool-separator"></div>
@@ -245,6 +259,9 @@ export class ToolbarView {
   }
 
   private bindHeaderEvents() {
+    this.headerElement.querySelector("#btn-find-text")?.addEventListener("click", () => {
+      window.dispatchEvent(new Event("open-document-search"));
+    });
     this.headerElement.querySelector("#btn-open")?.addEventListener("click", pickPdf);
 
     this.headerElement.querySelector("#btn-save")?.addEventListener("click", async () => {
@@ -310,7 +327,7 @@ export class ToolbarView {
         await Backend.saveDocumentAs(target, false);
         toast.show({ message: `Saved to ${target}`, type: "success" });
         const updated = await Backend.getDocumentState();
-        editorState.setDocument(updated);
+        editorState.updateDocument(updated);
       }
     } catch (err: any) {
       toast.show({ message: `Save As failed: ${err}`, type: "error" });
@@ -332,7 +349,7 @@ export class ToolbarView {
       const pages = editorState.selectedPages.size > 0 ? Array.from(editorState.selectedPages) : [editorState.currentPage];
       try {
         const doc = await Backend.rotatePages(pages, 90);
-        editorState.setDocument(doc);
+        editorState.updateDocument(doc);
         toast.show({ message: `Rotated page(s) +90Â°`, type: "info" });
       } catch (err: any) {
         toast.show({ message: err.toString(), type: "error" });
@@ -344,7 +361,7 @@ export class ToolbarView {
       const pages = editorState.selectedPages.size > 0 ? Array.from(editorState.selectedPages) : [editorState.currentPage];
       try {
         const doc = await Backend.rotatePages(pages, -90);
-        editorState.setDocument(doc);
+        editorState.updateDocument(doc);
         toast.show({ message: `Rotated page(s) -90Â°`, type: "info" });
       } catch (err: any) {
         toast.show({ message: err.toString(), type: "error" });
@@ -356,7 +373,7 @@ export class ToolbarView {
       try {
         const at = editorState.currentPage + 1;
         const doc = await Backend.insertBlankPage(at, 612.0, 792.0);
-        editorState.setDocument(doc);
+        editorState.updateDocument(doc);
         editorState.setCurrentPage(at);
         toast.show({ message: `Inserted blank page at ${at + 1}`, type: "success" });
       } catch (err: any) {
@@ -373,7 +390,7 @@ export class ToolbarView {
       }
       try {
         const doc = await Backend.deletePages(pages);
-        editorState.setDocument(doc);
+        editorState.updateDocument(doc);
         toast.show({ message: `Deleted ${pages.length} page(s)`, type: "info" });
       } catch (err: any) {
         toast.show({ message: err.toString(), type: "error" });

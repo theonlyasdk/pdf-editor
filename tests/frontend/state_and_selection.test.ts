@@ -143,7 +143,7 @@ describe("Frontend Editor State & Selection Logic", () => {
     expect(STRINGS.menu.open).toBeTruthy();
     expect(STRINGS.tools.pen).toBeTruthy();
     expect(STRINGS.tools.trueRedact).toBeTruthy();
-    expect(STRINGS.redaction.warning).toContain("irreversibly");
+    expect(STRINGS.redaction.warning).toContain("Removes matching text from this page");
     expect(STRINGS.crop.title).toBeTruthy();
     expect(STRINGS.emptyState.headline).toBeTruthy();
   });

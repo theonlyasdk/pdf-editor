@@ -1,3 +1,6 @@
+import { Ellipsis } from "lucide";
+import { icon } from "./ui/icon";
+import { showContextMenu, showPageMenu } from "./EditorContextMenu";
 import { DocumentDto } from "../types/editor";
 import { PageRasterQueue } from "./ui/PageRasterQueue";
 import { STRINGS } from "../i18n/strings";
@@ -11,6 +14,9 @@ export class ThumbnailRailView {
   private raster: PageRasterQueue | null = null;
   private renderedDocument: DocumentDto | null = null;
   private selection = "";
+  private documentVersion = -1;
+  private rasterVersion = -1;
+  private activePage = -1;
 
   constructor(element: HTMLElement) {
     this.element = element;
@@ -31,20 +37,40 @@ export class ThumbnailRailView {
     const doc = editorState.doc;
     const selectedCount = editorState.selectedPages.size;
     const selection = `${editorState.currentPage}:${[...editorState.selectedPages].join(",")}`;
-    if (this.renderedDocument === doc) {
+    const rebuilt = this.documentVersion !== editorState.documentVersion || this.renderedDocument?.page_count !== doc.page_count;
+    if (!rebuilt && this.rasterVersion !== editorState.rasterVersion) {
+      this.rasterVersion = editorState.rasterVersion;
+      for (const card of this.element.querySelectorAll<HTMLElement>(".thumbnail-card")) {
+        const index = Number(card.dataset.pageIndex);
+        const page = doc.pages[index];
+        const preview = card.querySelector<HTMLElement>(".thumbnail-preview")!;
+        preview.style.aspectRatio = `${page.width} / ${page.height}`;
+        card.querySelector(".thumbnail-detail")!.textContent = [page.rotation ? `${page.rotation}°` : "", page.crop_box ? "Cropped" : ""].filter(Boolean).join(" · ");
+        this.raster?.add(preview, preview.querySelector("img")!, index, 200);
+      }
+    }
+    if (!rebuilt) {
+      this.renderedDocument = doc;
       if (selection === this.selection) return;
       this.selection = selection;
       for (const card of this.element.querySelectorAll<HTMLElement>(".thumbnail-card")) {
         const index = Number(card.dataset.pageIndex);
         card.classList.toggle("selected", editorState.selectedPages.has(index));
-        card.classList.toggle("current", index === editorState.currentPage);
+        const current = index === editorState.currentPage;
+        card.classList.toggle("current", current);
+        if (current) card.setAttribute("aria-current", "page");
+        else card.removeAttribute("aria-current");
       }
       const feedback = this.element.querySelector("#rail-range-feedback");
       if (feedback) feedback.textContent = selectedCount
-        ? STRINGS.pageOps.selectedCount.replace("{count}", String(selectedCount))
-        : "Type range & press Enter";
+        ? `${selectedCount} selected`
+        : "";
+      this.followCurrentPage();
       return;
     }
+    this.activePage = -1;
+    this.documentVersion = editorState.documentVersion;
+    this.rasterVersion = editorState.rasterVersion;
     this.raster?.reset();
     this.renderedDocument = doc;
     this.selection = selection;
@@ -52,17 +78,14 @@ export class ThumbnailRailView {
     this.element.innerHTML = `
       <div class="rail-header">
         <div class="rail-tools">
-          <span class="font-semibold text-xs">${doc.page_count} Pages</span>
-          <div class="ui-button-group">
-            <button class="ui-button ui-button--outline ui-button--sm py-0 px-2" id="rail-select-all" title="Select All (Ctrl+A)">All</button>
-            <button class="ui-button ui-button--outline ui-button--sm py-0 px-2" id="rail-select-invert" title="Invert Selection">Invert</button>
-            <button class="ui-button ui-button--outline ui-button--sm py-0 px-2" id="rail-select-clear" title="Clear Selection">Clear</button>
-          </div>
+          <span class="font-semibold">Pages <span class="rail-page-count">${doc.page_count}</span></span>
+          <button class="ui-button ui-button--tool" id="rail-selection-menu" type="button" aria-label="Page selection options" aria-haspopup="menu">${icon(Ellipsis)}</button>
         </div>
-        <div>
-          <input type="text" class="page-range-input" id="rail-range-input" placeholder="e.g. 1-5, odd, last-2, !3..." title="Programmatic page range expression" />
+        <div class="rail-range">
+          <label class="property-label" for="rail-range-input">Select by range</label>
+          <input type="text" class="ui-input" id="rail-range-input" placeholder="1-5, odd" title="Enter a page range and press Enter" />
           <div id="rail-range-feedback" class="text-xs text-muted-foreground mt-1" style="font-size: 11px;">
-            ${selectedCount > 0 ? STRINGS.pageOps.selectedCount.replace("{count}", selectedCount.toString()) : "Type range & press Enter"}
+            ${selectedCount > 0 ? `${selectedCount} selected` : ""}
           </div>
         </div>
       </div>
@@ -73,6 +96,19 @@ export class ThumbnailRailView {
 
     this.renderThumbnailCards();
     this.bindRailEvents();
+    this.followCurrentPage();
+  }
+
+  private followCurrentPage() {
+    if (this.activePage === editorState.currentPage) return;
+    this.activePage = editorState.currentPage;
+    const list = this.element.querySelector<HTMLElement>(".thumbnail-list");
+    const card = list?.querySelector<HTMLElement>(`[data-page-index="${this.activePage}"]`);
+    if (!list || !card) return;
+    const bounds = list.getBoundingClientRect();
+    const item = card.getBoundingClientRect();
+    if (item.top < bounds.top) list.scrollTop += item.top - bounds.top - 6;
+    else if (item.bottom > bounds.bottom) list.scrollTop += item.bottom - bounds.bottom + 6;
   }
 
   private renderThumbnailCards() {
@@ -91,6 +127,16 @@ export class ThumbnailRailView {
       const card = document.createElement("div");
       card.className = `thumbnail-card ${isSelected ? "selected" : ""} ${isCurrent ? "current" : ""}`;
       card.setAttribute("draggable", "true");
+      card.tabIndex = 0;
+      card.setAttribute("aria-label", `Page ${i + 1}`);
+      if (isCurrent) card.setAttribute("aria-current", "page");
+      card.addEventListener("contextmenu", (event) => showPageMenu(event, i));
+      card.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          card.click();
+        }
+      });
       card.setAttribute("data-page-index", i.toString());
 
       // Header row with page number and rotation indicator
@@ -98,10 +144,7 @@ export class ThumbnailRailView {
       metaRow.className = "flex justify-between w-full px-1";
       metaRow.innerHTML = `
         <span class="thumbnail-label">${i + 1}</span>
-        <div>
-          ${pageInfo.rotation !== 0 ? `<span class="ui-badge py-0 px-1" style="font-size: 9px;">${pageInfo.rotation}°</span>` : ""}
-          ${pageInfo.crop_box ? `<span class="ui-badge py-0 px-1" style="font-size: 9px;">Crop</span>` : ""}
-        </div>
+        <span class="thumbnail-detail">${[pageInfo.rotation ? `${pageInfo.rotation}°` : "", pageInfo.crop_box ? "Cropped" : ""].filter(Boolean).join(" · ")}</span>
       `;
       card.appendChild(metaRow);
 
@@ -156,7 +199,7 @@ export class ThumbnailRailView {
 
           try {
             const updated = await Backend.reorderPages(currentPages);
-            editorState.setDocument(updated);
+            editorState.updateDocument(updated);
             editorState.setCurrentPage(toIdx);
             toast.show({ message: `Moved Page ${fromIdx + 1} to position ${toIdx + 1}`, type: "info" });
           } catch (err: any) {
@@ -189,17 +232,12 @@ export class ThumbnailRailView {
   }
 
   private bindRailEvents() {
-    this.element.querySelector("#rail-select-all")?.addEventListener("click", () => {
-      editorState.selectAllPages();
-    });
-
-    this.element.querySelector("#rail-select-invert")?.addEventListener("click", () => {
-      editorState.invertPageSelection();
-    });
-
-    this.element.querySelector("#rail-select-clear")?.addEventListener("click", () => {
-      editorState.selectedPages.clear();
-      editorState.notify();
+    this.element.querySelector<HTMLButtonElement>("#rail-selection-menu")?.addEventListener("click", (event) => {
+      showContextMenu(event, "Page selection", [
+        { label: "Select all", run: () => editorState.selectAllPages() },
+        { label: "Invert selection", run: () => editorState.invertPageSelection() },
+        { label: "Clear selection", run: () => editorState.selectPageRange([]) },
+      ]);
     });
 
     const rangeInput = this.element.querySelector("#rail-range-input") as HTMLInputElement | null;
@@ -208,7 +246,7 @@ export class ThumbnailRailView {
     rangeInput?.addEventListener("input", async () => {
       const val = rangeInput.value.trim();
       if (!val || !editorState.doc) {
-        if (rangeFeedback) rangeFeedback.textContent = "Type range & press Enter";
+        if (rangeFeedback) rangeFeedback.textContent = "";
         return;
       }
 

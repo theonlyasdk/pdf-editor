@@ -29,8 +29,8 @@ export const Backend = {
     return callIpc<DocumentDto>("rotate_pages", { pages, deltaDeg });
   },
 
-  async cropPages(pages: number[], cropBox: PageBox | null): Promise<DocumentDto> {
-    return callIpc<DocumentDto>("crop_pages", { pages, cropBox });
+  async cropPages(pages: number[], cropBox: PageBox | null, keepPageSize = false): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("crop_pages", { pages, cropBox, keepPageSize });
   },
 
   async deletePages(pages: number[]): Promise<DocumentDto> {
@@ -57,8 +57,8 @@ export const Backend = {
     return callIpc<DocumentDto>("cover_erase", { pageIndex, rect, color });
   },
 
-  async trueRedact(pageIndex: number, rect: PageBox, text?: string): Promise<DocumentDto> {
-    return callIpc<DocumentDto>("true_redact", { pageIndex, rect, text });
+  async redactText(pageIndex: number, text: string): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("true_redact", { pageIndex, text });
   },
 
   async undo(): Promise<DocumentDto> {

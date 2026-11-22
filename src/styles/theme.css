@@ -24,6 +24,8 @@
   --ring: #386e5e;
   --radius: 6px;
   --workspace: #e9ebe7;
+  --scroll-thumb: #9ba59e;
+  --scroll-thumb-hover: #77857c;
 }
 
 :root[data-theme="dark"] {
@@ -47,6 +49,8 @@
   --input: #555e57;
   --ring: #a5d5bf;
   --workspace: #151716;
+  --scroll-thumb: #59675e;
+  --scroll-thumb-hover: #758a7d;
 }
 
 :root {

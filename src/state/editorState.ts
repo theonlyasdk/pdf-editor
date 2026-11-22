@@ -16,6 +16,8 @@ class EditorState {
   recentFiles: string[] = [];
   cropBox: PageBox | null = null;
   openingFile: string | null = null;
+  documentVersion = 0;
+  rasterVersion = 0;
 
   toolSettings: ToolSettings = {
     strokeColor: "#2563eb",
@@ -69,6 +71,8 @@ class EditorState {
   }
 
   setDocument(doc: DocumentDto | null) {
+    this.documentVersion++;
+    this.rasterVersion++;
     this.doc = doc;
     this.selectedPages.clear();
     this.selectedAnnotationId = null;
@@ -81,6 +85,18 @@ class EditorState {
     } else {
       this.notify();
     }
+  }
+
+  updateDocument(doc: DocumentDto) {
+    this.rasterVersion++;
+    this.doc = doc;
+    if (!doc.annotations?.some(({ id }) => id === this.selectedAnnotationId)) this.selectedAnnotationId = null;
+    this.currentPage = Math.max(0, Math.min(this.currentPage, doc.page_count - 1));
+    for (const page of this.selectedPages) {
+      if (page >= doc.page_count) this.selectedPages.delete(page);
+    }
+    if (this.activeTool === "crop") this.initCropBoxForCurrentPage();
+    this.notify();
   }
 
   addRecentFile(path: string) {
@@ -147,10 +163,17 @@ class EditorState {
     this.setZoom(this.zoom / 1.2);
   }
 
+  selectAnnotation(id: string | null) {
+    if (this.selectedAnnotationId === id) return;
+    this.selectedAnnotationId = id;
+    this.notify();
+  }
+
   setCurrentPage(page: number) {
     if (this.doc && page >= 0 && page < this.doc.page_count) {
       if (this.currentPage === page) return;
       this.currentPage = page;
+      this.selectedAnnotationId = null;
       if (this.activeTool === "crop") {
         this.initCropBoxForCurrentPage();
       }
@@ -224,21 +247,21 @@ class EditorState {
     this.setTheme(this.theme === "light" ? "dark" : "light");
   }
 
-  updateToolSettings(settings: Partial<ToolSettings>) {
+  updateToolSettings(settings: Partial<ToolSettings>, render = true) {
     this.toolSettings = { ...this.toolSettings, ...settings };
     try {
       localStorage.setItem("pdf_editor_tool_settings", JSON.stringify(this.toolSettings));
     } catch {
       // Storage fallback
     }
-    this.notify();
+    if (render) this.notify();
   }
 
   async undo() {
     if (!this.doc?.can_undo) return;
     try {
       const updated = await Backend.undo();
-      this.setDocument(updated);
+      this.updateDocument(updated);
     } catch (err) {
       console.error("Undo failed:", err);
     }
@@ -248,7 +271,7 @@ class EditorState {
     if (!this.doc?.can_redo) return;
     try {
       const updated = await Backend.redo();
-      this.setDocument(updated);
+      this.updateDocument(updated);
     } catch (err) {
       console.error("Redo failed:", err);
     }
