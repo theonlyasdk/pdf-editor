@@ -84,6 +84,8 @@ export interface SearchResult {
   bounding_boxes: PageBox[];
 }
 
+export type CropRatioMode = "free" | "original" | "1:1" | "4:3" | "16:9";
+
 export interface ToolSettings {
   strokeColor: string;
   fillColor: string | null;
@@ -95,4 +97,5 @@ export interface ToolSettings {
   stampText: string;
   coverColor: string;
   units: "pt" | "mm" | "in";
+  cropRatioMode: CropRatioMode;
 }

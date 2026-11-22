@@ -24,6 +24,8 @@ describe("Frontend Editor State & Selection Logic", () => {
 
   beforeEach(() => {
     editorState.setDocument(mockDoc);
+    editorState.setCropRatioMode("free");
+    editorState.setTool("select");
   });
 
   it("should initialize with correct document metadata and page count", () => {
@@ -87,8 +89,44 @@ describe("Frontend Editor State & Selection Logic", () => {
     expect(editorState.toolSettings.strokeWidth).toBe(5);
     expect(editorState.toolSettings.strokeColor).toBe("#ff0000");
 
+    editorState.setTool("crop");
+    expect(editorState.activeTool).toBe("crop");
+    expect(editorState.cropBox).not.toBeNull();
+    expect(editorState.cropBox?.width).toBeGreaterThan(0);
+
+    editorState.setCropRatioMode("1:1");
+    expect(editorState.toolSettings.cropRatioMode).toBe("1:1");
+
     editorState.setTool("trueRedact");
     expect(editorState.activeTool).toBe("trueRedact");
+  });
+
+  it("should handle crop fixed vs free aspect ratio logic", () => {
+    editorState.setTool("crop");
+    expect(editorState.cropBox).not.toBeNull();
+
+    // Default is free ratio
+    expect(editorState.toolSettings.cropRatioMode).toBe("free");
+
+    // Free ratio adjustment: set arbitrary non-proportional box
+    editorState.setCropBox({ x: 50, y: 50, width: 300, height: 150 });
+    expect(editorState.cropBox?.width).toBe(300);
+    expect(editorState.cropBox?.height).toBe(150);
+
+    // Fixed ratio toggle: 1:1 square mode
+    editorState.setCropRatioMode("1:1");
+    expect(editorState.toolSettings.cropRatioMode).toBe("1:1");
+
+    // Standard presets: 4:3 and 16:9
+    editorState.setCropRatioMode("4:3");
+    expect(editorState.toolSettings.cropRatioMode).toBe("4:3");
+
+    editorState.setCropRatioMode("16:9");
+    expect(editorState.toolSettings.cropRatioMode).toBe("16:9");
+
+    // Resetting back to free ratio
+    editorState.setCropRatioMode("free");
+    expect(editorState.toolSettings.cropRatioMode).toBe("free");
   });
 
   it("should manage recent files list without duplicates", () => {

@@ -13,6 +13,14 @@ export class CanvasViewportView {
   private activeDrawPath: { x: number; y: number }[] = [];
   private activePageForDraw = 0;
 
+  // Interactive Crop State
+  private isCtrlHeld = false;
+  private cropDragHandle: string | null = null;
+  private cropStartPt: { x: number; y: number } | null = null;
+  private cropStartBox: PageBox | null = null;
+  private cropStartRatio = 1.0;
+  private cropActivePage = 0;
+
   constructor(element: HTMLElement) {
     this.element = element;
     this.element.className = "canvas-viewport";
@@ -24,6 +32,7 @@ export class CanvasViewportView {
     this.render();
     editorState.subscribe(() => this.render());
     this.bindViewportEvents();
+    this.bindGlobalCropEvents();
   }
 
   private render() {
@@ -102,9 +111,449 @@ export class CanvasViewportView {
     svg.setAttribute("data-page-index", pageIndex.toString());
     wrapper.appendChild(svg);
 
-    this.bindDrawingOnSvg(svg, pageIndex, pageInfo);
+    // If Crop tool is active on this page, render the interactive crop box & handles
+    if (editorState.activeTool === "crop" && pageIndex === editorState.currentPage) {
+      this.cropActivePage = pageIndex;
+      if (!editorState.cropBox) {
+        editorState.initCropBoxForCurrentPage();
+      }
+      this.renderCropOverlay(wrapper, svg, pageIndex, pageInfo, zoom);
+    } else {
+      this.bindDrawingOnSvg(svg, pageIndex, pageInfo);
+    }
 
     return wrapper;
+  }
+
+  /**
+   * Renders the interactive crop overlay with dimmed exterior, rule-of-thirds grid,
+   * 8 resize handles, and floating HUD pill with fixed/free ratio indicator.
+   */
+  private renderCropOverlay(
+    wrapper: HTMLElement,
+    svg: SVGSVGElement,
+    pageIndex: number,
+    pageInfo: PageInfo,
+    zoom: number
+  ) {
+    const box = editorState.cropBox || {
+      x: Math.round(pageInfo.width * 0.08),
+      y: Math.round(pageInfo.height * 0.08),
+      width: Math.round(pageInfo.width * 0.84),
+      height: Math.round(pageInfo.height * 0.84),
+    };
+
+    const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    g.setAttribute("class", "crop-interactive-overlay");
+
+    // 1. Dimmed exterior shroud (4 rects around the crop window)
+    const shroudTop = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    shroudTop.setAttribute("x", "0");
+    shroudTop.setAttribute("y", "0");
+    shroudTop.setAttribute("width", pageInfo.width.toString());
+    shroudTop.setAttribute("height", Math.max(0, box.y).toString());
+    shroudTop.setAttribute("class", "crop-shroud");
+    g.appendChild(shroudTop);
+
+    const shroudBottom = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    shroudBottom.setAttribute("x", "0");
+    shroudBottom.setAttribute("y", (box.y + box.height).toString());
+    shroudBottom.setAttribute("width", pageInfo.width.toString());
+    shroudBottom.setAttribute("height", Math.max(0, pageInfo.height - (box.y + box.height)).toString());
+    shroudBottom.setAttribute("class", "crop-shroud");
+    g.appendChild(shroudBottom);
+
+    const shroudLeft = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    shroudLeft.setAttribute("x", "0");
+    shroudLeft.setAttribute("y", box.y.toString());
+    shroudLeft.setAttribute("width", Math.max(0, box.x).toString());
+    shroudLeft.setAttribute("height", box.height.toString());
+    shroudLeft.setAttribute("class", "crop-shroud");
+    g.appendChild(shroudLeft);
+
+    const shroudRight = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    shroudRight.setAttribute("x", (box.x + box.width).toString());
+    shroudRight.setAttribute("y", box.y.toString());
+    shroudRight.setAttribute("width", Math.max(0, pageInfo.width - (box.x + box.width)).toString());
+    shroudRight.setAttribute("height", box.height.toString());
+    shroudRight.setAttribute("class", "crop-shroud");
+    g.appendChild(shroudRight);
+
+    // 2. Crop box outline (crisp dashed boundary with drop shadow)
+    const outline = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    outline.setAttribute("x", box.x.toString());
+    outline.setAttribute("y", box.y.toString());
+    outline.setAttribute("width", box.width.toString());
+    outline.setAttribute("height", box.height.toString());
+    outline.setAttribute("class", "crop-box-outline");
+    g.appendChild(outline);
+
+    // 3. Rule of Thirds gridlines inside the crop box
+    const h1 = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    h1.setAttribute("x1", box.x.toString());
+    h1.setAttribute("y1", (box.y + box.height / 3).toString());
+    h1.setAttribute("x2", (box.x + box.width).toString());
+    h1.setAttribute("y2", (box.y + box.height / 3).toString());
+    h1.setAttribute("class", "crop-grid-line");
+    g.appendChild(h1);
+
+    const h2 = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    h2.setAttribute("x1", box.x.toString());
+    h2.setAttribute("y1", (box.y + (2 * box.height) / 3).toString());
+    h2.setAttribute("x2", (box.x + box.width).toString());
+    h2.setAttribute("y2", (box.y + (2 * box.height) / 3).toString());
+    h2.setAttribute("class", "crop-grid-line");
+    g.appendChild(h2);
+
+    const v1 = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    v1.setAttribute("x1", (box.x + box.width / 3).toString());
+    v1.setAttribute("y1", box.y.toString());
+    v1.setAttribute("x2", (box.x + box.width / 3).toString());
+    v1.setAttribute("y2", (box.y + box.height).toString());
+    v1.setAttribute("class", "crop-grid-line");
+    g.appendChild(v1);
+
+    const v2 = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    v2.setAttribute("x1", (box.x + (2 * box.width) / 3).toString());
+    v2.setAttribute("y1", box.y.toString());
+    v2.setAttribute("x2", (box.x + (2 * box.width) / 3).toString());
+    v2.setAttribute("y2", (box.y + box.height).toString());
+    v2.setAttribute("class", "crop-grid-line");
+    g.appendChild(v2);
+
+    // 4. Center Move Target
+    const moveTarget = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    moveTarget.setAttribute("x", box.x.toString());
+    moveTarget.setAttribute("y", box.y.toString());
+    moveTarget.setAttribute("width", box.width.toString());
+    moveTarget.setAttribute("height", box.height.toString());
+    moveTarget.setAttribute("fill", "transparent");
+    moveTarget.setAttribute("style", "cursor: move;");
+    moveTarget.setAttribute("data-handle", "move");
+    g.appendChild(moveTarget);
+
+    // 5. Four Corner Handles (nw, ne, se, sw)
+    const cornerSize = 14;
+    const addCornerHandle = (handleId: string, hx: number, hy: number, cursor: string) => {
+      // Visible corner bracket handle
+      const h = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      h.setAttribute("x", (hx - cornerSize / 2).toString());
+      h.setAttribute("y", (hy - cornerSize / 2).toString());
+      h.setAttribute("width", cornerSize.toString());
+      h.setAttribute("height", cornerSize.toString());
+      h.setAttribute("class", "crop-handle-corner");
+      h.setAttribute("style", `cursor: ${cursor};`);
+      h.setAttribute("data-handle", handleId);
+      g.appendChild(h);
+    };
+
+    addCornerHandle("nw", box.x, box.y, "nwse-resize");
+    addCornerHandle("ne", box.x + box.width, box.y, "nesw-resize");
+    addCornerHandle("se", box.x + box.width, box.y + box.height, "nwse-resize");
+    addCornerHandle("sw", box.x, box.y + box.height, "nesw-resize");
+
+    // 6. Four Edge Handles (n, s, w, e)
+    const edgeLength = 26;
+    const edgeThick = 7;
+    const addEdgeHandle = (
+      handleId: string,
+      hx: number,
+      hy: number,
+      w: number,
+      h: number,
+      cursor: string
+    ) => {
+      const el = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      el.setAttribute("x", (hx - w / 2).toString());
+      el.setAttribute("y", (hy - h / 2).toString());
+      el.setAttribute("width", w.toString());
+      el.setAttribute("height", h.toString());
+      el.setAttribute("class", "crop-handle-edge");
+      el.setAttribute("style", `cursor: ${cursor};`);
+      el.setAttribute("data-handle", handleId);
+      g.appendChild(el);
+    };
+
+    addEdgeHandle("n", box.x + box.width / 2, box.y, edgeLength, edgeThick, "ns-resize");
+    addEdgeHandle("s", box.x + box.width / 2, box.y + box.height, edgeLength, edgeThick, "ns-resize");
+    addEdgeHandle("w", box.x, box.y + box.height / 2, edgeThick, edgeLength, "ew-resize");
+    addEdgeHandle("e", box.x + box.width, box.y + box.height / 2, edgeThick, edgeLength, "ew-resize");
+
+    svg.appendChild(g);
+
+    // Bind mousedown for crop handles
+    g.querySelectorAll("[data-handle]").forEach((handleEl) => {
+      handleEl.addEventListener("mousedown", (e: any) => {
+        if (e.button !== 0) return;
+        e.stopPropagation();
+        e.preventDefault();
+
+        const handleType = handleEl.getAttribute("data-handle");
+        if (!handleType) return;
+
+        const rect = svg.getBoundingClientRect();
+        const scaleX = pageInfo.width / rect.width;
+        const scaleY = pageInfo.height / rect.height;
+        const pt = {
+          x: (e.clientX - rect.left) * scaleX,
+          y: (e.clientY - rect.top) * scaleY,
+        };
+
+        this.cropDragHandle = handleType;
+        this.cropStartPt = pt;
+        this.cropStartBox = { ...box };
+        this.cropStartRatio = box.width / Math.max(1, box.height);
+      });
+    });
+
+    // 7. Floating HUD / Action Bar attached to Crop Box
+    const isLocked = this.isCtrlHeld || editorState.toolSettings.cropRatioMode !== "free";
+    const hud = document.createElement("div");
+    hud.className = "crop-floating-hud";
+
+    const scaledHeight = Math.round(pageInfo.height * zoom);
+    const hudLeft = Math.round((box.x + box.width / 2) * zoom);
+    let hudTop = Math.round((box.y + box.height) * zoom) + 10;
+    // If overflowing below page, flip above
+    if (hudTop + 45 > scaledHeight) {
+      hudTop = Math.max(8, Math.round(box.y * zoom) - 45);
+    }
+
+    hud.style.left = `${hudLeft}px`;
+    hud.style.top = `${hudTop}px`;
+    hud.style.transform = "translateX(-50%)";
+
+    hud.innerHTML = `
+      <div class="crop-hud-inner">
+        <span class="crop-hud-dims">${Math.round(box.width)} × ${Math.round(box.height)} pt</span>
+        <span class="crop-hud-badge ${isLocked ? "locked" : ""}" id="crop-hud-ratio-tag">
+          ${isLocked ? `🔒 Fixed Ratio (${(box.width / Math.max(1, box.height)).toFixed(2)})` : "Free Ratio (Hold Ctrl to Lock)"}
+        </span>
+        <div class="crop-hud-actions">
+          <button class="btn btn-sm btn-primary py-0 px-2 fw-medium" id="hud-crop-apply">Apply (Enter)</button>
+          <button class="btn btn-sm btn-outline-secondary py-0 px-2 text-white" id="hud-crop-cancel">Cancel (Esc)</button>
+        </div>
+      </div>
+    `;
+
+    hud.querySelector("#hud-crop-apply")?.addEventListener("click", () => this.applyActiveCrop());
+    hud.querySelector("#hud-crop-cancel")?.addEventListener("click", () => this.cancelActiveCrop());
+
+    wrapper.appendChild(hud);
+  }
+
+  private bindGlobalCropEvents() {
+    // Window key listeners for Ctrl ratio toggle and Enter/Esc shortcuts
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Control") {
+        this.isCtrlHeld = true;
+        this.updateCropHudBadges();
+      }
+
+      if (editorState.activeTool === "crop") {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          this.applyActiveCrop();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          this.cancelActiveCrop();
+        }
+      }
+    });
+
+    window.addEventListener("keyup", (e) => {
+      if (e.key === "Control") {
+        this.isCtrlHeld = false;
+        this.updateCropHudBadges();
+      }
+    });
+
+    // Window mousemove for handle dragging
+    window.addEventListener("mousemove", (e) => {
+      if (!this.cropDragHandle || !this.cropStartPt || !this.cropStartBox || !editorState.doc) {
+        return;
+      }
+
+      const doc = editorState.doc;
+      const pageInfo = doc.pages[this.cropActivePage];
+      if (!pageInfo) return;
+
+      const pageEl = document.querySelector(`#pdf-page-${this.cropActivePage} svg`);
+      if (!pageEl) return;
+
+      const rect = pageEl.getBoundingClientRect();
+      const scaleX = pageInfo.width / rect.width;
+      const scaleY = pageInfo.height / rect.height;
+      const curPt = {
+        x: (e.clientX - rect.left) * scaleX,
+        y: (e.clientY - rect.top) * scaleY,
+      };
+
+      const dx = curPt.x - this.cropStartPt.x;
+      const dy = curPt.y - this.cropStartPt.y;
+
+      const lockRatio = e.ctrlKey || this.isCtrlHeld || editorState.toolSettings.cropRatioMode !== "free";
+      let targetRatio = this.cropStartRatio;
+      if (editorState.toolSettings.cropRatioMode === "1:1") targetRatio = 1.0;
+      else if (editorState.toolSettings.cropRatioMode === "4:3") targetRatio = 4 / 3;
+      else if (editorState.toolSettings.cropRatioMode === "16:9") targetRatio = 16 / 9;
+      else if (editorState.toolSettings.cropRatioMode === "original") targetRatio = pageInfo.width / pageInfo.height;
+
+      const sb = this.cropStartBox;
+      let newBox: PageBox = { ...sb };
+
+      if (this.cropDragHandle === "move") {
+        newBox.x = Math.max(0, Math.min(pageInfo.width - sb.width, sb.x + dx));
+        newBox.y = Math.max(0, Math.min(pageInfo.height - sb.height, sb.y + dy));
+      } else if (this.cropDragHandle === "se") {
+        // Anchor is top-left (sb.x, sb.y)
+        let w = Math.max(24, sb.width + dx);
+        let h = Math.max(24, sb.height + dy);
+        if (lockRatio) {
+          if (Math.abs(dx) >= Math.abs(dy)) h = w / targetRatio;
+          else w = h * targetRatio;
+        }
+        w = Math.min(w, pageInfo.width - sb.x);
+        h = Math.min(h, pageInfo.height - sb.y);
+        if (lockRatio) {
+          if (w / h > targetRatio) w = h * targetRatio;
+          else h = w / targetRatio;
+        }
+        newBox = { x: sb.x, y: sb.y, width: w, height: h };
+      } else if (this.cropDragHandle === "sw") {
+        // Anchor is top-right (sb.x + sb.width, sb.y)
+        const anchorX = sb.x + sb.width;
+        let w = Math.max(24, sb.width - dx);
+        let h = Math.max(24, sb.height + dy);
+        if (lockRatio) {
+          if (Math.abs(dx) >= Math.abs(dy)) h = w / targetRatio;
+          else w = h * targetRatio;
+        }
+        w = Math.min(w, anchorX);
+        h = Math.min(h, pageInfo.height - sb.y);
+        if (lockRatio) {
+          if (w / h > targetRatio) w = h * targetRatio;
+          else h = w / targetRatio;
+        }
+        newBox = { x: anchorX - w, y: sb.y, width: w, height: h };
+      } else if (this.cropDragHandle === "ne") {
+        // Anchor is bottom-left (sb.x, sb.y + sb.height)
+        const anchorY = sb.y + sb.height;
+        let w = Math.max(24, sb.width + dx);
+        let h = Math.max(24, sb.height - dy);
+        if (lockRatio) {
+          if (Math.abs(dx) >= Math.abs(dy)) h = w / targetRatio;
+          else w = h * targetRatio;
+        }
+        w = Math.min(w, pageInfo.width - sb.x);
+        h = Math.min(h, anchorY);
+        if (lockRatio) {
+          if (w / h > targetRatio) w = h * targetRatio;
+          else h = w / targetRatio;
+        }
+        newBox = { x: sb.x, y: anchorY - h, width: w, height: h };
+      } else if (this.cropDragHandle === "nw") {
+        // Anchor is bottom-right (sb.x + sb.width, sb.y + sb.height)
+        const anchorX = sb.x + sb.width;
+        const anchorY = sb.y + sb.height;
+        let w = Math.max(24, sb.width - dx);
+        let h = Math.max(24, sb.height - dy);
+        if (lockRatio) {
+          if (Math.abs(dx) >= Math.abs(dy)) h = w / targetRatio;
+          else w = h * targetRatio;
+        }
+        w = Math.min(w, anchorX);
+        h = Math.min(h, anchorY);
+        if (lockRatio) {
+          if (w / h > targetRatio) w = h * targetRatio;
+          else h = w / targetRatio;
+        }
+        newBox = { x: anchorX - w, y: anchorY - h, width: w, height: h };
+      } else if (this.cropDragHandle === "n") {
+        const anchorY = sb.y + sb.height;
+        let h = Math.max(24, Math.min(anchorY, sb.height - dy));
+        let w = sb.width;
+        let x = sb.x;
+        if (lockRatio) {
+          w = h * targetRatio;
+          x = Math.max(0, Math.min(pageInfo.width - w, sb.x + (sb.width - w) / 2));
+        }
+        newBox = { x, y: anchorY - h, width: w, height: h };
+      } else if (this.cropDragHandle === "s") {
+        let h = Math.max(24, Math.min(pageInfo.height - sb.y, sb.height + dy));
+        let w = sb.width;
+        let x = sb.x;
+        if (lockRatio) {
+          w = h * targetRatio;
+          x = Math.max(0, Math.min(pageInfo.width - w, sb.x + (sb.width - w) / 2));
+        }
+        newBox = { x, y: sb.y, width: w, height: h };
+      } else if (this.cropDragHandle === "w") {
+        const anchorX = sb.x + sb.width;
+        let w = Math.max(24, Math.min(anchorX, sb.width - dx));
+        let h = sb.height;
+        let y = sb.y;
+        if (lockRatio) {
+          h = w / targetRatio;
+          y = Math.max(0, Math.min(pageInfo.height - h, sb.y + (sb.height - h) / 2));
+        }
+        newBox = { x: anchorX - w, y, width: w, height: h };
+      } else if (this.cropDragHandle === "e") {
+        let w = Math.max(24, Math.min(pageInfo.width - sb.x, sb.width + dx));
+        let h = sb.height;
+        let y = sb.y;
+        if (lockRatio) {
+          h = w / targetRatio;
+          y = Math.max(0, Math.min(pageInfo.height - h, sb.y + (sb.height - h) / 2));
+        }
+        newBox = { x: sb.x, y, width: w, height: h };
+      }
+
+      editorState.setCropBox(newBox);
+    });
+
+    window.addEventListener("mouseup", () => {
+      this.cropDragHandle = null;
+      this.cropStartPt = null;
+      this.cropStartBox = null;
+    });
+  }
+
+  private updateCropHudBadges() {
+    const isLocked = this.isCtrlHeld || editorState.toolSettings.cropRatioMode !== "free";
+    const tag = document.querySelector("#crop-hud-ratio-tag");
+    if (tag) {
+      if (isLocked) {
+        tag.classList.add("locked");
+        const ratio = editorState.cropBox
+          ? (editorState.cropBox.width / Math.max(1, editorState.cropBox.height)).toFixed(2)
+          : "1.00";
+        tag.textContent = `🔒 Fixed Ratio (${ratio})`;
+      } else {
+        tag.classList.remove("locked");
+        tag.textContent = "Free Ratio (Hold Ctrl to Lock)";
+      }
+    }
+  }
+
+  async applyActiveCrop() {
+    if (!editorState.cropBox || !editorState.doc) return;
+    try {
+      const updated = await Backend.cropPages([editorState.currentPage], editorState.cropBox);
+      editorState.setDocument(updated);
+      editorState.setTool("select");
+      toast.show({
+        message: `Crop applied to page ${editorState.currentPage + 1}`,
+        type: "success",
+      });
+    } catch (err: any) {
+      toast.show({ message: err.toString(), type: "error" });
+    }
+  }
+
+  cancelActiveCrop() {
+    editorState.setCropBox(null);
+    editorState.setTool("select");
   }
 
   private bindDrawingOnSvg(svg: SVGSVGElement, pageIndex: number, pageInfo: PageInfo) {
@@ -121,7 +570,7 @@ export class CanvasViewportView {
     svg.addEventListener("mousedown", (e) => {
       if (e.button !== 0) return; // Primary button only
       const tool = editorState.activeTool;
-      if (tool === "hand" || tool === "select") return;
+      if (tool === "hand" || tool === "select" || tool === "crop") return;
 
       this.isDrawing = true;
       this.activePageForDraw = pageIndex;
@@ -137,7 +586,6 @@ export class CanvasViewportView {
       const tool = editorState.activeTool;
 
       if (tool === "pen" || tool === "highlighter") {
-        // Hold shift to lock straight line
         if (e.shiftKey && this.activeDrawPath.length > 0) {
           const first = this.activeDrawPath[0];
           this.activeDrawPath = [first, pt];
@@ -152,8 +600,7 @@ export class CanvasViewportView {
         tool === "arrow" ||
         tool === "coverErase" ||
         tool === "trueRedact" ||
-        tool === "highlight" ||
-        tool === "crop"
+        tool === "highlight"
       ) {
         this.renderLiveShapePreview(svg, this.startPoint, pt, tool);
       }
@@ -165,7 +612,6 @@ export class CanvasViewportView {
       const endPoint = getPdfCoords(e);
       const tool = editorState.activeTool;
 
-      // Clear temporary rubber-band preview elements
       svg.querySelectorAll(".temp-draw-preview").forEach((el) => el.remove());
 
       const x = Math.min(this.startPoint.x, endPoint.x);
@@ -188,14 +634,6 @@ export class CanvasViewportView {
           const updated = await Backend.trueRedact(pageIndex, rect);
           editorState.setDocument(updated);
           toast.show({ message: "True redaction applied. Underlying text scrubbed.", type: "warning" });
-        } catch (err: any) {
-          toast.show({ message: err.toString(), type: "error" });
-        }
-      } else if (tool === "crop") {
-        try {
-          const updated = await Backend.cropPages([pageIndex], rect);
-          editorState.setDocument(updated);
-          toast.show({ message: `Crop applied to page ${pageIndex + 1}`, type: "info" });
         } catch (err: any) {
           toast.show({ message: err.toString(), type: "error" });
         }
@@ -343,15 +781,6 @@ export class CanvasViewportView {
       preview.setAttribute("fill", editorState.toolSettings.coverColor);
       preview.setAttribute("stroke", "#3b82f6");
       preview.setAttribute("stroke-width", "1");
-    } else if (tool === "crop") {
-      preview.setAttribute("x", x.toString());
-      preview.setAttribute("y", y.toString());
-      preview.setAttribute("width", w.toString());
-      preview.setAttribute("height", h.toString());
-      preview.setAttribute("fill", "rgba(59, 130, 246, 0.15)");
-      preview.setAttribute("stroke", "#2563eb");
-      preview.setAttribute("stroke-width", "2");
-      preview.setAttribute("stroke-dasharray", "6 4");
     } else {
       preview.setAttribute("x", x.toString());
       preview.setAttribute("y", y.toString());
@@ -364,19 +793,21 @@ export class CanvasViewportView {
   }
 
   private bindViewportEvents() {
-    // Ctrl + Mouse Wheel for smooth zooming
-    this.element.addEventListener("wheel", (e) => {
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
-        if (e.deltaY < 0) {
-          editorState.zoomIn();
-        } else {
-          editorState.zoomOut();
+    this.element.addEventListener(
+      "wheel",
+      (e) => {
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          if (e.deltaY < 0) {
+            editorState.zoomIn();
+          } else {
+            editorState.zoomOut();
+          }
         }
-      }
-    }, { passive: false });
+      },
+      { passive: false }
+    );
 
-    // Jump to page event listener
     window.addEventListener("jump-to-page", (e: any) => {
       const idx = e.detail?.pageIndex;
       if (typeof idx === "number") {

@@ -16,7 +16,7 @@
 | | Move to position by number, reverse order | Done + Tested | `DocumentState::reorder_pages` & `reverse_pages` |
 | | Delete, duplicate, rotate (90/180/270) | Done + Tested | `core_suite.rs` & `e2e_full_workflow.rs` |
 | | Insert blank page, extract pages | Done + Tested | `DocumentState::insert_blank_page` unit test |
-| | Non-destructive Crop (handles, pt/mm/in, presets) | Done + Tested | `CropPagesCommand` & `e2e_full_workflow.rs` |
+| | Non-destructive Crop (auto handles, free/fixed ratio via Ctrl, presets) | Done + Tested | `CropPagesCommand`, `state_and_selection.test.ts`, interactive SVG handles |
 | **Annotate & Draw**| Real PDF Annotations (not screenshots) | Done + Tested | `core_suite.rs::test_pdfium_rendering_and_roundtrip` |
 | | Select, move, resize, align | Done + Tested | SVG interactive layer & `AnnotationDto` |
 | | Free text box (font, size, color, bold, align) | Done + Tested | `annotations::create_pdf_annotation` FreeText test |

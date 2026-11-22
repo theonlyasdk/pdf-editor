@@ -3,8 +3,8 @@
 ## Test Execution Summary
 
 - **Pure Rust Unit Tests (`pdf-core`)**: 15 tests, **15 passed**, 0 failed (Execution time: 0.51s).
-- **Frontend Unit Tests (Vitest)**: 7 tests, **7 passed**, 0 failed (Execution time: 0.11s).
-- **Clippy Warnings**: 0 warnings across all crates (`cargo clippy --workspace`).
+- **Frontend Unit Tests (Vitest)**: 8 tests, **8 passed**, 0 failed (Execution time: 0.13s).
+- **Clippy Warnings**: 0 warnings across all crates (`cargo clippy --workspace --all-targets -- -D warnings`).
 - **Compiler Warnings**: 0 warnings (`cargo check`, `cargo build`).
 
 ---

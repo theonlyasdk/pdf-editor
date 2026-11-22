@@ -76,7 +76,7 @@ pub trait DocumentCommand: Send + Sync {
 - [x] **M1: Research & Spike** (Bootstrap 6 alpha evaluated, Tauri v2 plugins researched, pure Rust spike passed).
 - [x] **M2: App Skeleton** (Tauri v2 + pure Rust `pdf-core`, themed Bootstrap 6 shell, drag-drop open, thumbnails & viewport).
 - [x] **M3: Page Operations** (Programmatic selection DSL, reordering, rotation, deletion, duplication, blank pages, safe save, undo/redo).
-- [x] **M4: Crop & Erase** (Non-destructive CropBox, Cover erase, True Redaction with content stream excising and byte scrubbing).
+- [x] **M4: Crop & Erase** (Non-destructive CropBox, auto-initialized handles on active page, default free ratio with Ctrl-held aspect ratio locking, rule-of-thirds grid, floating HUD, Cover erase, True Redaction with content stream excising and byte scrubbing).
 - [x] **M5: Annotations** (Free text, pen, highlighter, shapes, sticky notes, real PDF appearance stream serialization).
 - [x] **M6: UX Polish** (Ctrl+K Command Palette, keyboard shortcuts, properties inspector, toasts with Undo, light/dark themes).
 - [x] **M7: Extras** (Full document text search, document metadata viewer/editor, recent files list, page crop presets).

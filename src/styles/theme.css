@@ -4,7 +4,7 @@
   --pdf-surface: #ffffff;
   --pdf-surface-hover: #f1f5f9;
   --pdf-surface-active: #e2e8f0;
-  --pdf-toolbar-bg: #f8fafc;
+  --pdf-toolbar-bg: #ffffff;
   --pdf-border: #e2e8f0;
   --pdf-border-focus: #3b82f6;
 
@@ -34,7 +34,8 @@
 
   --radius-sm: 4px;
   --radius-md: 6px;
-  --radius-lg: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
 
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -42,29 +43,31 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -1px rgba(0, 0, 0, 0.04);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  --shadow-card: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
 
   --transition-fast: 150ms cubic-bezier(0.2, 0, 0, 1);
   --focus-ring: 0 0 0 2px #ffffff, 0 0 0 4px var(--pdf-accent);
 }
 
 [data-theme="dark"] {
-  --pdf-bg: #0f172a;
-  --pdf-surface: #1e293b;
-  --pdf-surface-hover: #334155;
-  --pdf-surface-active: #475569;
-  --pdf-toolbar-bg: #0f172a;
-  --pdf-border: #334155;
-  --pdf-border-focus: #60a5fa;
+  /* Rich deep obsidian & slate desktop theme */
+  --pdf-bg: #090d16;
+  --pdf-surface: #111827;
+  --pdf-surface-hover: #1e293b;
+  --pdf-surface-active: #334155;
+  --pdf-toolbar-bg: #0d121f;
+  --pdf-border: #1e293b;
+  --pdf-border-focus: #3b82f6;
 
   --pdf-text-main: #f8fafc;
-  --pdf-text-muted: #94a3b8;
-  --pdf-text-inverse: #0f172a;
+  --pdf-text-muted: #8b9bb4;
+  --pdf-text-inverse: #090d16;
 
   --pdf-accent: #3b82f6;
   --pdf-accent-hover: #60a5fa;
   --pdf-accent-active: #2563eb;
   --pdf-accent-subtle: #1e3a8a;
-  --pdf-accent-border: #1d4ed8;
+  --pdf-accent-border: #2563eb;
 
   --pdf-danger: #ef4444;
   --pdf-danger-subtle: #450a0a;
@@ -73,9 +76,10 @@
   --pdf-success: #22c55e;
   --pdf-success-subtle: #052e16;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.6);
+  --shadow-card: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
 
-  --focus-ring: 0 0 0 2px #0f172a, 0 0 0 4px var(--pdf-accent);
+  --focus-ring: 0 0 0 2px #090d16, 0 0 0 4px var(--pdf-accent);
 }

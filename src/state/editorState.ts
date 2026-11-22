@@ -1,5 +1,5 @@
 import { Backend } from "../ipc/backend";
-import { DocumentDto, ToolSettings, ToolType, ViewMode } from "../types/editor";
+import { CropRatioMode, DocumentDto, PageBox, ToolSettings, ToolType, ViewMode } from "../types/editor";
 
 export type Listener = () => void;
 
@@ -13,6 +13,7 @@ class EditorState {
   selectedAnnotationId: string | null = null;
   theme: "light" | "dark" = "light";
   recentFiles: string[] = [];
+  cropBox: PageBox | null = null;
 
   toolSettings: ToolSettings = {
     strokeColor: "#2563eb",
@@ -25,6 +26,7 @@ class EditorState {
     stampText: "APPROVED",
     coverColor: "#ffffff",
     units: "pt",
+    cropRatioMode: "free",
   };
 
   private listeners: Set<Listener> = new Set();
@@ -69,6 +71,7 @@ class EditorState {
     this.selectedPages.clear();
     this.selectedAnnotationId = null;
     this.currentPage = 0;
+    this.cropBox = null;
 
     if (doc?.file_path) {
       this.addRecentFile(doc.file_path);
@@ -86,8 +89,34 @@ class EditorState {
     this.notify();
   }
 
+  initCropBoxForCurrentPage() {
+    if (!this.doc) return;
+    const page = this.doc.pages[this.currentPage];
+    if (page) {
+      this.cropBox = page.crop_box ?? {
+        x: Math.round(page.width * 0.08),
+        y: Math.round(page.height * 0.08),
+        width: Math.round(page.width * 0.84),
+        height: Math.round(page.height * 0.84),
+      };
+    }
+  }
+
+  setCropBox(box: PageBox | null) {
+    this.cropBox = box;
+    this.notify();
+  }
+
+  setCropRatioMode(mode: CropRatioMode) {
+    this.toolSettings.cropRatioMode = mode;
+    this.notify();
+  }
+
   setTool(tool: ToolType) {
     this.activeTool = tool;
+    if (tool === "crop" && this.doc) {
+      this.initCropBoxForCurrentPage();
+    }
     this.notify();
   }
 
@@ -112,6 +141,9 @@ class EditorState {
   setCurrentPage(page: number) {
     if (this.doc && page >= 0 && page < this.doc.page_count) {
       this.currentPage = page;
+      if (this.activeTool === "crop") {
+        this.initCropBoxForCurrentPage();
+      }
       this.notify();
     }
   }

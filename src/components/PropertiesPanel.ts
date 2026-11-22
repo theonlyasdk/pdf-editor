@@ -115,19 +115,6 @@ export class PropertiesPanelView {
           </select>
         </div>
       `;
-    } else if (tool === "crop") {
-      bodyHtml = `
-        <div class="property-group">
-          <label class="property-label">${STRINGS.crop.title}</label>
-          <p class="small text-muted mb-2">Draw a crop box on any page or apply a standard preset below.</p>
-          <div class="d-grid gap-2">
-            <button class="btn btn-outline-secondary btn-sm text-start" id="crop-preset-trim">${STRINGS.crop.presetTrimMargins}</button>
-            <button class="btn btn-outline-secondary btn-sm text-start" id="crop-preset-a4">${STRINGS.crop.presetA4}</button>
-            <button class="btn btn-outline-secondary btn-sm text-start" id="crop-preset-letter">${STRINGS.crop.presetLetter}</button>
-            <button class="btn btn-outline-danger btn-sm text-start mt-2" id="crop-reset">${STRINGS.crop.reset}</button>
-          </div>
-        </div>
-      `;
     } else if (tool === "coverErase") {
       bodyHtml = `
         <div class="property-group">
@@ -154,6 +141,101 @@ export class PropertiesPanelView {
           <p class="small text-muted mt-2" style="font-size: 11px;">
             Or drag a red bounding box directly over any content on the page to permanently excise it.
           </p>
+        </div>
+      `;
+    } else if (tool === "crop") {
+      const page = editorState.doc?.pages[editorState.currentPage] || { width: 612, height: 792, index: 0 };
+      const box = editorState.cropBox || {
+        x: Math.round(page.width * 0.08),
+        y: Math.round(page.height * 0.08),
+        width: Math.round(page.width * 0.84),
+        height: Math.round(page.height * 0.84),
+      };
+      const ratioMode = settings.cropRatioMode;
+
+      bodyHtml = `
+        <div class="property-group">
+          <div class="d-flex justify-content-between align-items-center mb-1">
+            <label class="property-label mb-0">Aspect Ratio</label>
+            <span class="badge ${ratioMode !== "free" ? "bg-primary" : "bg-secondary-subtle text-secondary"} border small" style="font-size: 10px;">
+              ${ratioMode !== "free" ? "Ratio Locked" : "Hold Ctrl to Lock"}
+            </span>
+          </div>
+          <select class="form-select form-select-sm" id="prop-crop-ratio">
+            <option value="free" ${ratioMode === "free" ? "selected" : ""}>Free Ratio (Default)</option>
+            <option value="original" ${ratioMode === "original" ? "selected" : ""}>Original Page Ratio (${(page.width / Math.max(1, page.height)).toFixed(2)})</option>
+            <option value="1:1" ${ratioMode === "1:1" ? "selected" : ""}>Square (1:1)</option>
+            <option value="4:3" ${ratioMode === "4:3" ? "selected" : ""}>Standard (4:3)</option>
+            <option value="16:9" ${ratioMode === "16:9" ? "selected" : ""}>Widescreen (16:9)</option>
+          </select>
+          <div class="form-text small" style="font-size: 11px;">
+            By default free resizing. Hold <kbd>Ctrl</kbd> while dragging handles to lock ratio.
+          </div>
+        </div>
+
+        <div class="property-group">
+          <label class="property-label">Crop Box Dimensions</label>
+          <div class="row g-2">
+            <div class="col-6">
+              <label class="small text-muted" style="font-size: 11px;">Width (pt)</label>
+              <input type="number" class="form-control form-control-sm" id="prop-crop-w" value="${Math.round(box.width)}" min="20" max="${Math.round(page.width)}" />
+            </div>
+            <div class="col-6">
+              <label class="small text-muted" style="font-size: 11px;">Height (pt)</label>
+              <input type="number" class="form-control form-control-sm" id="prop-crop-h" value="${Math.round(box.height)}" min="20" max="${Math.round(page.height)}" />
+            </div>
+            <div class="col-6">
+              <label class="small text-muted" style="font-size: 11px;">Left / X (pt)</label>
+              <input type="number" class="form-control form-control-sm" id="prop-crop-x" value="${Math.round(box.x)}" min="0" max="${Math.round(page.width)}" />
+            </div>
+            <div class="col-6">
+              <label class="small text-muted" style="font-size: 11px;">Top / Y (pt)</label>
+              <input type="number" class="form-control form-control-sm" id="prop-crop-y" value="${Math.round(box.y)}" min="0" max="${Math.round(page.height)}" />
+            </div>
+          </div>
+        </div>
+
+        <div class="property-group">
+          <label class="property-label">Quick Presets</label>
+          <div class="d-grid gap-1">
+            <button class="btn btn-outline-secondary btn-sm text-start py-1" id="preset-trim-margins">
+              Trim Margins (10% Margin)
+            </button>
+            <button class="btn btn-outline-secondary btn-sm text-start py-1" id="preset-fit-a4">
+              A4 Format Fit
+            </button>
+            <button class="btn btn-outline-secondary btn-sm text-start py-1" id="preset-fit-letter">
+              US Letter Format Fit
+            </button>
+            <button class="btn btn-outline-secondary btn-sm text-start py-1" id="preset-full-page">
+              Reset to Full Page
+            </button>
+          </div>
+        </div>
+
+        <div class="property-group">
+          <label class="property-label">Target Scope</label>
+          <div class="form-check">
+            <input class="form-check-input" type="radio" name="crop-scope" id="crop-scope-current" value="current" checked />
+            <label class="form-check-label small" for="crop-scope-current">Current Page (Page ${page.index + 1})</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="radio" name="crop-scope" id="crop-scope-selected" value="selected" />
+            <label class="form-check-label small" for="crop-scope-selected">Selected Pages (${editorState.selectedPages.size || 1})</label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="radio" name="crop-scope" id="crop-scope-all" value="all" />
+            <label class="form-check-label small" for="crop-scope-all">All Pages in Document</label>
+          </div>
+        </div>
+
+        <div class="d-grid gap-2 mt-2">
+          <button class="btn btn-primary btn-sm fw-medium shadow-sm" id="btn-panel-crop-apply">
+            Apply Crop (Enter)
+          </button>
+          <button class="btn btn-outline-secondary btn-sm" id="btn-panel-crop-cancel">
+            Cancel (Esc)
+          </button>
         </div>
       `;
     } else if (tool === "stamp") {
@@ -267,35 +349,139 @@ export class PropertiesPanelView {
       }
     });
 
-    // Crop Presets
-    this.element.querySelector("#crop-preset-trim")?.addEventListener("click", async () => {
+    // Crop Panel Handlers
+    const ratioSelect = this.element.querySelector("#prop-crop-ratio") as HTMLSelectElement | null;
+    ratioSelect?.addEventListener("change", () => {
+      const mode = ratioSelect.value as any;
+      editorState.setCropRatioMode(mode);
+
+      // Re-conform active crop box to selected ratio if not free
+      if (mode !== "free" && editorState.cropBox && editorState.doc) {
+        const page = editorState.doc.pages[editorState.currentPage];
+        let targetRatio = 1.0;
+        if (mode === "1:1") targetRatio = 1.0;
+        else if (mode === "4:3") targetRatio = 4 / 3;
+        else if (mode === "16:9") targetRatio = 16 / 9;
+        else if (mode === "original") targetRatio = page.width / page.height;
+
+        const cur = editorState.cropBox;
+        let newW = cur.width;
+        let newH = newW / targetRatio;
+        if (cur.y + newH > page.height) {
+          newH = page.height - cur.y;
+          newW = newH * targetRatio;
+        }
+        editorState.setCropBox({ ...cur, width: newW, height: newH });
+      }
+    });
+
+    const cropWInput = this.element.querySelector("#prop-crop-w") as HTMLInputElement | null;
+    const cropHInput = this.element.querySelector("#prop-crop-h") as HTMLInputElement | null;
+    const cropXInput = this.element.querySelector("#prop-crop-x") as HTMLInputElement | null;
+    const cropYInput = this.element.querySelector("#prop-crop-y") as HTMLInputElement | null;
+
+    const handleCropNumericChange = () => {
+      if (!editorState.cropBox) return;
+      const w = parseFloat(cropWInput?.value || "100");
+      const h = parseFloat(cropHInput?.value || "100");
+      const x = parseFloat(cropXInput?.value || "0");
+      const y = parseFloat(cropYInput?.value || "0");
+      editorState.setCropBox({ x, y, width: Math.max(20, w), height: Math.max(20, h) });
+    };
+
+    cropWInput?.addEventListener("input", handleCropNumericChange);
+    cropHInput?.addEventListener("input", handleCropNumericChange);
+    cropXInput?.addEventListener("input", handleCropNumericChange);
+    cropYInput?.addEventListener("input", handleCropNumericChange);
+
+    // Presets
+    this.element.querySelector("#preset-trim-margins")?.addEventListener("click", () => {
       if (!editorState.doc) return;
-      const pageInfo = editorState.doc.pages[editorState.currentPage];
-      const trimW = pageInfo.width * 0.9;
-      const trimH = pageInfo.height * 0.9;
-      const cropBox = {
-        x: pageInfo.width * 0.05,
-        y: pageInfo.height * 0.05,
-        width: trimW,
-        height: trimH,
-      };
+      const page = editorState.doc.pages[editorState.currentPage];
+      editorState.setCropBox({
+        x: Math.round(page.width * 0.05),
+        y: Math.round(page.height * 0.05),
+        width: Math.round(page.width * 0.9),
+        height: Math.round(page.height * 0.9),
+      });
+    });
+
+    this.element.querySelector("#preset-fit-a4")?.addEventListener("click", () => {
+      if (!editorState.doc) return;
+      const page = editorState.doc.pages[editorState.currentPage];
+      const a4Ratio = 210 / 297;
+      let w = page.width * 0.9;
+      let h = w / a4Ratio;
+      if (h > page.height * 0.9) {
+        h = page.height * 0.9;
+        w = h * a4Ratio;
+      }
+      editorState.setCropBox({
+        x: Math.round((page.width - w) / 2),
+        y: Math.round((page.height - h) / 2),
+        width: Math.round(w),
+        height: Math.round(h),
+      });
+    });
+
+    this.element.querySelector("#preset-fit-letter")?.addEventListener("click", () => {
+      if (!editorState.doc) return;
+      const page = editorState.doc.pages[editorState.currentPage];
+      const letterRatio = 8.5 / 11;
+      let w = page.width * 0.9;
+      let h = w / letterRatio;
+      if (h > page.height * 0.9) {
+        h = page.height * 0.9;
+        w = h * letterRatio;
+      }
+      editorState.setCropBox({
+        x: Math.round((page.width - w) / 2),
+        y: Math.round((page.height - h) / 2),
+        width: Math.round(w),
+        height: Math.round(h),
+      });
+    });
+
+    this.element.querySelector("#preset-full-page")?.addEventListener("click", () => {
+      if (!editorState.doc) return;
+      const page = editorState.doc.pages[editorState.currentPage];
+      editorState.setCropBox({
+        x: 0,
+        y: 0,
+        width: page.width,
+        height: page.height,
+      });
+    });
+
+    // Apply & Cancel buttons in properties panel
+    this.element.querySelector("#btn-panel-crop-apply")?.addEventListener("click", async () => {
+      if (!editorState.cropBox || !editorState.doc) return;
+      const scopeRadio = this.element.querySelector("input[name='crop-scope']:checked") as HTMLInputElement | null;
+      const scope = scopeRadio?.value || "current";
+
+      let targetPages: number[] = [editorState.currentPage];
+      if (scope === "selected") {
+        targetPages = editorState.selectedPages.size > 0 ? Array.from(editorState.selectedPages) : [editorState.currentPage];
+      } else if (scope === "all") {
+        targetPages = Array.from({ length: editorState.doc.page_count }, (_, i) => i);
+      }
+
       try {
-        const updated = await Backend.cropPages([editorState.currentPage], cropBox);
+        const updated = await Backend.cropPages(targetPages, editorState.cropBox);
         editorState.setDocument(updated);
-        toast.show({ message: "Applied 10% margin trim", type: "info" });
+        editorState.setTool("select");
+        toast.show({
+          message: `Crop applied to ${targetPages.length} page(s).`,
+          type: "success",
+        });
       } catch (err: any) {
         toast.show({ message: err.toString(), type: "error" });
       }
     });
 
-    this.element.querySelector("#crop-reset")?.addEventListener("click", async () => {
-      try {
-        const updated = await Backend.cropPages([editorState.currentPage], null);
-        editorState.setDocument(updated);
-        toast.show({ message: "Reset page crop box", type: "info" });
-      } catch (err: any) {
-        toast.show({ message: err.toString(), type: "error" });
-      }
+    this.element.querySelector("#btn-panel-crop-cancel")?.addEventListener("click", () => {
+      editorState.setCropBox(null);
+      editorState.setTool("select");
     });
   }
 }
