@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF Editor</title>
+    <!-- Bootstrap 6 alpha 1 distribution stylesheet -->
+    <link rel="stylesheet" href="/node_modules/bootstrap/dist/css/bootstrap.min.css" />
+    <!-- Application custom styles & semantic tokens -->
+    <link rel="stylesheet" href="/src/styles/theme.css" />
+    <link rel="stylesheet" href="/src/styles/app.css" />
+  </head>
+  <body>
+    <div id="app-root">
+      <!-- Top Application Header -->
+      <header id="app-header" class="app-header" role="banner"></header>
+
+      <!-- Secondary Slim Action Toolbar -->
+      <nav id="action-toolbar" class="action-toolbar" role="toolbar" aria-label="Editor Tools"></nav>
+
+      <!-- Main Workspace (Three-panel layout) -->
+      <main class="main-workspace" role="main">
+        <!-- Left Thumbnail Rail -->
+        <aside id="thumbnail-rail" class="thumbnail-rail" aria-label="Page Thumbnails"></aside>
+
+        <!-- Center Canvas Viewport -->
+        <section id="canvas-viewport" class="canvas-viewport" aria-label="Document Canvas"></section>
+
+        <!-- Right Properties Panel -->
+        <aside id="properties-panel" class="properties-panel" aria-label="Tool Properties"></aside>
+
+        <!-- Empty State Dropzone Overlay (when no file is open) -->
+        <div id="empty-state-container"></div>
+      </main>
+
+      <!-- Status Bar -->
+      <footer id="status-bar" class="status-bar" role="contentinfo">
+        <span id="status-page-info">Ready</span>
+        <span id="status-zoom-info">100%</span>
+      </footer>
+    </div>
+
+    <!-- Application Script -->
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

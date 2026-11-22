@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="pdfGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ef4444"/>
+      <stop offset="100%" stop-color="#b91c1c"/>
+    </linearGradient>
+  </defs>
+  <!-- Background squircle -->
+  <rect x="32" y="32" width="448" height="448" rx="96" fill="url(#bgGrad)" stroke="#334155" stroke-width="8"/>
+  <!-- Document shape -->
+  <path d="M 144 112 L 304 112 L 368 176 L 368 400 L 144 400 Z" fill="#ffffff" rx="12"/>
+  <!-- Folded corner -->
+  <path d="M 304 112 L 304 176 L 368 176 Z" fill="#cbd5e1"/>
+  <!-- PDF Badge -->
+  <rect x="176" y="240" width="160" height="64" rx="12" fill="url(#pdfGrad)"/>
+  <text x="256" y="284" font-family="system-ui, -apple-system, sans-serif" font-size="32" font-weight="900" fill="#ffffff" text-anchor="middle" letter-spacing="2">PDF</text>
+  <!-- Pen accent -->
+  <circle cx="340" cy="350" r="32" fill="#2563eb" stroke="#ffffff" stroke-width="6"/>
+  <path d="M 330 360 L 350 340 M 346 336 L 354 344" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+</svg>

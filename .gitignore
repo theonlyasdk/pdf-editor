@@ -1,0 +1,11 @@
+/target
+/dist
+/node_modules
+/.gemini
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+*.bak
+*.tmp*
