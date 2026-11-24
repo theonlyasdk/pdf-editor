@@ -1,10 +1,8 @@
-import { openPdf, pickPdf } from "./OpenPdf";
 import { ChevronRight, FileText, FolderOpen, Plus } from "lucide";
 import { icon } from "./ui/icon";
 import { STRINGS } from "../i18n/strings";
-import { Backend } from "../ipc/backend";
 import { editorState } from "../state/editorState";
-import { toast } from "./Toast";
+import { guardedNewDocument, guardedOpenPdf, guardedPickPdf } from "./UnsavedGuard";
 
 export class EmptyStateView {
   private element: HTMLElement;
@@ -81,21 +79,18 @@ export class EmptyStateView {
     const newBtn = this.element.querySelector("#empty-new-btn");
     const recentList = this.element.querySelector("#recent-files-list");
 
-    openBtn?.addEventListener("click", pickPdf);
-    newBtn?.addEventListener("click", async () => {
-      try {
-        const doc = await Backend.newDocument();
-        editorState.setDocument(doc);
-      } catch (err: any) {
-        toast.show({ message: err.toString(), type: "error" });
-      }
+    openBtn?.addEventListener("click", () => {
+      void guardedPickPdf();
+    });
+    newBtn?.addEventListener("click", () => {
+      void guardedNewDocument();
     });
 
     recentList?.addEventListener("click", (e) => {
       const target = (e.target as HTMLElement).closest("button[data-path]") as HTMLButtonElement | null;
       if (target) {
         const path = target.getAttribute("data-path");
-        if (path) void openPdf(path);
+        if (path) void guardedOpenPdf(path);
       }
     });
 

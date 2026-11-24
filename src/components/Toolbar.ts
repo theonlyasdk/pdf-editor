@@ -1,12 +1,58 @@
-import { showToolMenu } from "./EditorContextMenu";
-import { pickPdf } from "./OpenPdf";
-import { Brush, FileText, FolderOpen, Save, Download, Undo2, Redo2, PanelsTopLeft, RectangleVertical, Columns2, Grid2X2, ZoomOut, ZoomIn, Search, Sun, Moon, MousePointer2, Hand, Highlighter, Underline, Strikethrough, Type, MessageSquare, PenTool, Square, Circle, Slash, ArrowRight, Stamp, Eraser, ShieldAlert, Crop, RotateCcw, RotateCw, Plus, Trash2 } from "lucide";
-import { icon } from "./ui/icon";
+import {
+  ArrowRight,
+  Brush,
+  Circle,
+  Columns2,
+  Download,
+  Droplets,
+  Eraser,
+  FileText,
+  FolderOpen,
+  Grid2X2,
+  Hand,
+  Highlighter,
+  Info,
+  Keyboard,
+  Maximize2,
+  MessageSquare,
+  Moon,
+  MousePointer2,
+  MoveHorizontal,
+  PanelsTopLeft,
+  PenTool,
+  Plus,
+  Printer,
+  RectangleVertical,
+  Redo2,
+  RotateCcw,
+  RotateCw,
+  Save,
+  Search,
+  Settings,
+  ShieldAlert,
+  Signature,
+  Slash,
+  Split,
+  Square,
+  Stamp,
+  Strikethrough,
+  Sun,
+  Trash2,
+  Type,
+  Underline,
+  Undo2,
+  ZoomIn,
+  ZoomOut,
+  Crop,
+} from "lucide";
 import { STRINGS } from "../i18n/strings";
 import { Backend } from "../ipc/backend";
 import { editorState } from "../state/editorState";
 import { ToolType, ViewMode } from "../types/editor";
+import { showToolMenu } from "./EditorContextMenu";
 import { toast } from "./Toast";
+import { guardedPickPdf } from "./UnsavedGuard";
+import { icon } from "./ui/icon";
 
 export class ToolbarView {
   private headerElement: HTMLElement;
@@ -37,6 +83,7 @@ export class ToolbarView {
     const isDirty = editorState.doc?.is_dirty ?? false;
     const canUndo = editorState.doc?.can_undo ?? false;
     const canRedo = editorState.doc?.can_redo ?? false;
+    const fitMode = editorState.zoomFitMode;
 
     this.headerElement.innerHTML = `
       <div class="header-left">
@@ -53,9 +100,15 @@ export class ToolbarView {
             ${icon(Save)}
             <span>Save</span>
           </button>
-          <button class="ui-button ui-button--tool" id="btn-save-as" ${!isDocOpen ? "disabled" : ""} title="${STRINGS.menu.saveAs}">
+          <button class="ui-button ui-button--tool" id="btn-save-as" ${!isDocOpen ? "disabled" : ""} title="${STRINGS.menu.saveAs} (${STRINGS.menu.saveAsShortcut})">
             ${icon(Download)}
             <span>Save As...</span>
+          </button>
+          <button class="ui-button ui-button--tool" id="btn-export-print" ${!isDocOpen ? "disabled" : ""} title="${STRINGS.menu.exportPrint}">
+            ${icon(Printer)}
+          </button>
+          <button class="ui-button ui-button--tool" id="btn-metadata" ${!isDocOpen ? "disabled" : ""} title="${STRINGS.menu.metadata}">
+            ${icon(Info)}
           </button>
           <div class="tool-separator"></div>
           <button class="ui-button ui-button--tool" id="btn-undo" ${!canUndo ? "disabled" : ""} title="Undo (Ctrl+Z)">
@@ -102,9 +155,15 @@ export class ToolbarView {
           <button class="ui-button ui-button--tool" id="btn-zoom-out" title="${STRINGS.viewModes.zoomOut}">
             ${icon(ZoomOut)}
           </button>
-          <span class="text-xs font-semibold px-1" style="min-width: 44px; text-align: center;">${Math.round(editorState.zoom * 100)}%</span>
+          <span class="zoom-readout text-xs font-semibold px-1">${Math.round(editorState.zoom * 100)}%</span>
           <button class="ui-button ui-button--tool" id="btn-zoom-in" title="${STRINGS.viewModes.zoomIn}">
             ${icon(ZoomIn)}
+          </button>
+          <button class="ui-button ui-button--tool ${fitMode === "fit-width" ? "active" : ""}" id="btn-fit-width" title="${STRINGS.viewModes.fitWidth}">
+            ${icon(MoveHorizontal)}
+          </button>
+          <button class="ui-button ui-button--tool ${fitMode === "fit-page" ? "active" : ""}" id="btn-fit-page" title="${STRINGS.viewModes.fitPage}">
+            ${icon(Maximize2)}
           </button>
 
           <button class="ui-button ui-button--tool" id="btn-find-text" title="Find in document (Ctrl+F)">
@@ -119,13 +178,19 @@ export class ToolbarView {
           <kbd class="palette-shortcut ms-1">Ctrl+K</kbd>
         </button>
 
+        <!-- Keyboard Shortcuts -->
+        <button class="ui-button ui-button--tool" id="btn-shortcuts" title="${STRINGS.menu.shortcuts} (?)">
+          ${icon(Keyboard)}
+        </button>
+
+        <!-- Preferences -->
+        <button class="ui-button ui-button--tool" id="btn-preferences" title="${STRINGS.menu.settings} (Ctrl+,)">
+          ${icon(Settings)}
+        </button>
+
         <!-- Theme Toggle -->
         <button class="ui-button ui-button--tool" id="btn-theme-toggle" title="Toggle Light / Dark theme">
-          ${
-            editorState.theme === "dark"
-              ? icon(Sun)
-              : icon(Moon)
-          }
+          ${editorState.theme === "dark" ? icon(Sun) : icon(Moon)}
         </button>
       </div>
     `;
@@ -143,7 +208,12 @@ export class ToolbarView {
   private labelButtons(container: HTMLElement) {
     for (const button of container.querySelectorAll<HTMLButtonElement>("button[title]")) {
       button.setAttribute("aria-label", button.title);
-      if (button.hasAttribute("data-tool") || button.id.startsWith("view-mode-")) {
+      if (
+        button.hasAttribute("data-tool") ||
+        button.id.startsWith("view-mode-") ||
+        button.id === "btn-fit-width" ||
+        button.id === "btn-fit-page"
+      ) {
         button.setAttribute("aria-pressed", String(button.classList.contains("active")));
       }
     }
@@ -215,6 +285,10 @@ export class ToolbarView {
         <button class="ui-button ui-button--tool ${t === "stamp" ? "active" : ""}" data-tool="stamp" title="${STRINGS.tools.stamp}">
           ${icon(Stamp)}
         </button>
+        <button class="ui-button ui-button--tool" id="btn-signature" title="${STRINGS.menu.signature}">
+          ${icon(Signature)}
+          <span>Sign</span>
+        </button>
 
         <div class="tool-separator"></div>
 
@@ -248,6 +322,12 @@ export class ToolbarView {
         <button class="ui-button ui-button--tool" id="btn-quick-insert-blank" title="${STRINGS.pageOps.insertBlank}">
           ${icon(Plus)}
         </button>
+        <button class="ui-button ui-button--tool" id="btn-merge-split" title="${STRINGS.menu.mergeSplit}">
+          ${icon(Split)}
+        </button>
+        <button class="ui-button ui-button--tool" id="btn-watermark" title="${STRINGS.menu.watermark}">
+          ${icon(Droplets)}
+        </button>
         <button class="ui-button ui-button--tool text-destructive" id="btn-quick-delete" title="${STRINGS.pageOps.deletePage}">
           ${icon(Trash2)}
         </button>
@@ -262,16 +342,18 @@ export class ToolbarView {
     this.headerElement.querySelector("#btn-find-text")?.addEventListener("click", () => {
       window.dispatchEvent(new Event("open-document-search"));
     });
-    this.headerElement.querySelector("#btn-open")?.addEventListener("click", pickPdf);
+    this.headerElement.querySelector("#btn-open")?.addEventListener("click", () => {
+      void guardedPickPdf();
+    });
 
     this.headerElement.querySelector("#btn-save")?.addEventListener("click", async () => {
       if (!editorState.doc) return;
       try {
         if (!editorState.doc.file_path) {
-          this.handleSaveAs();
+          void this.handleSaveAs();
           return;
         }
-        await Backend.saveDocument(true);
+        await Backend.saveDocument(editorState.preferences.makeBackup);
         editorState.doc.is_dirty = false;
         editorState.notify();
         toast.show({ message: STRINGS.toasts.saved, type: "success" });
@@ -281,15 +363,23 @@ export class ToolbarView {
     });
 
     this.headerElement.querySelector("#btn-save-as")?.addEventListener("click", () => {
-      this.handleSaveAs();
+      void this.handleSaveAs();
+    });
+
+    this.headerElement.querySelector("#btn-export-print")?.addEventListener("click", () => {
+      window.dispatchEvent(new CustomEvent("open-export-print"));
+    });
+
+    this.headerElement.querySelector("#btn-metadata")?.addEventListener("click", () => {
+      window.dispatchEvent(new CustomEvent("open-metadata"));
     });
 
     this.headerElement.querySelector("#btn-undo")?.addEventListener("click", () => {
-      editorState.undo();
+      void editorState.undo();
     });
 
     this.headerElement.querySelector("#btn-redo")?.addEventListener("click", () => {
-      editorState.redo();
+      void editorState.redo();
     });
 
     this.headerElement.querySelector("#btn-zoom-in")?.addEventListener("click", () => {
@@ -300,12 +390,28 @@ export class ToolbarView {
       editorState.zoomOut();
     });
 
+    this.headerElement.querySelector("#btn-fit-width")?.addEventListener("click", () => {
+      editorState.requestFitWidth();
+    });
+
+    this.headerElement.querySelector("#btn-fit-page")?.addEventListener("click", () => {
+      editorState.requestFitPage();
+    });
+
     this.headerElement.querySelector("#btn-theme-toggle")?.addEventListener("click", () => {
       editorState.toggleTheme();
     });
 
     this.headerElement.querySelector("#btn-cmd-palette")?.addEventListener("click", () => {
       window.dispatchEvent(new CustomEvent("open-command-palette"));
+    });
+
+    this.headerElement.querySelector("#btn-shortcuts")?.addEventListener("click", () => {
+      window.dispatchEvent(new CustomEvent("open-shortcuts"));
+    });
+
+    this.headerElement.querySelector("#btn-preferences")?.addEventListener("click", () => {
+      window.dispatchEvent(new CustomEvent("open-preferences"));
     });
 
     // View modes
@@ -324,7 +430,7 @@ export class ToolbarView {
         filters: [{ name: "PDF Document", extensions: ["pdf"] }],
       });
       if (target && typeof target === "string") {
-        await Backend.saveDocumentAs(target, false);
+        await Backend.saveDocumentAs(target, editorState.preferences.makeBackup);
         toast.show({ message: `Saved to ${target}`, type: "success" });
         const updated = await Backend.getDocumentState();
         editorState.updateDocument(updated);
@@ -344,13 +450,17 @@ export class ToolbarView {
       });
     });
 
+    this.actionToolbarElement.querySelector("#btn-signature")?.addEventListener("click", () => {
+      window.dispatchEvent(new CustomEvent("open-signature"));
+    });
+
     // Quick rotate CW
     this.actionToolbarElement.querySelector("#btn-quick-rotate-cw")?.addEventListener("click", async () => {
       const pages = editorState.selectedPages.size > 0 ? Array.from(editorState.selectedPages) : [editorState.currentPage];
       try {
         const doc = await Backend.rotatePages(pages, 90);
         editorState.updateDocument(doc);
-        toast.show({ message: `Rotated page(s) +90Â°`, type: "info" });
+        toast.show({ message: "Rotated page(s) +90°", type: "info" });
       } catch (err: any) {
         toast.show({ message: err.toString(), type: "error" });
       }
@@ -362,23 +472,25 @@ export class ToolbarView {
       try {
         const doc = await Backend.rotatePages(pages, -90);
         editorState.updateDocument(doc);
-        toast.show({ message: `Rotated page(s) -90Â°`, type: "info" });
+        toast.show({ message: "Rotated page(s) -90°", type: "info" });
       } catch (err: any) {
         toast.show({ message: err.toString(), type: "error" });
       }
     });
 
-    // Quick insert blank
-    this.actionToolbarElement.querySelector("#btn-quick-insert-blank")?.addEventListener("click", async () => {
-      try {
-        const at = editorState.currentPage + 1;
-        const doc = await Backend.insertBlankPage(at, 612.0, 792.0);
-        editorState.updateDocument(doc);
-        editorState.setCurrentPage(at);
-        toast.show({ message: `Inserted blank page at ${at + 1}`, type: "success" });
-      } catch (err: any) {
-        toast.show({ message: err.toString(), type: "error" });
-      }
+    // Insert blank page modal
+    this.actionToolbarElement.querySelector("#btn-quick-insert-blank")?.addEventListener("click", () => {
+      window.dispatchEvent(new CustomEvent("open-insert-page"));
+    });
+
+    // Merge / split modal
+    this.actionToolbarElement.querySelector("#btn-merge-split")?.addEventListener("click", () => {
+      window.dispatchEvent(new CustomEvent("open-merge-split"));
+    });
+
+    // Watermark / headers / page numbers modal
+    this.actionToolbarElement.querySelector("#btn-watermark")?.addEventListener("click", () => {
+      window.dispatchEvent(new CustomEvent("open-watermark"));
     });
 
     // Quick delete

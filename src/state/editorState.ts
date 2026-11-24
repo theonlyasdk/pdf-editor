@@ -1,16 +1,52 @@
 import { Backend } from "../ipc/backend";
-import { CropRatioMode, DocumentDto, PageBox, ToolSettings, ToolType, ViewMode } from "../types/editor";
+import {
+  AreaRedactItem,
+  CropRatioMode,
+  DocumentDto,
+  EditorPreferences,
+  PageBox,
+  SidebarTab,
+  ThemeMode,
+  ToolSettings,
+  ToolType,
+  ViewMode,
+  ZoomFitMode,
+} from "../types/editor";
 
 export type Listener = () => void;
+
+export const DEFAULT_PREFERENCES: EditorPreferences = {
+  themeMode: "system",
+  defaultViewMode: "continuous",
+  defaultZoom: "100%",
+  units: "pt",
+  author: "User",
+  makeBackup: true,
+  autosaveIntervalSec: 0,
+};
+
+function resolveEffectiveTheme(mode: ThemeMode): "light" | "dark" {
+  if (mode === "light" || mode === "dark") return mode;
+  if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  if (typeof document !== "undefined" && document.documentElement.dataset.theme === "dark") {
+    return "dark";
+  }
+  return "light";
+}
 
 class EditorState {
   doc: DocumentDto | null = null;
   activeTool: ToolType = "select";
   viewMode: ViewMode = "continuous";
   zoom: number = 1.0; // 100%
+  zoomFitMode: ZoomFitMode = "custom";
   currentPage: number = 0;
   selectedPages: Set<number> = new Set();
   selectedAnnotationId: string | null = null;
+  activeSidebarTab: SidebarTab = "thumbnails";
+  pendingRedactions: AreaRedactItem[] = [];
   theme: "light" | "dark" =
     typeof document !== "undefined" && document.documentElement.dataset.theme === "dark" ? "dark" : "light";
   recentFiles: string[] = [];
@@ -18,6 +54,8 @@ class EditorState {
   openingFile: string | null = null;
   documentVersion = 0;
   rasterVersion = 0;
+
+  preferences: EditorPreferences = { ...DEFAULT_PREFERENCES };
 
   toolSettings: ToolSettings = {
     strokeColor: "#2563eb",
@@ -37,6 +75,25 @@ class EditorState {
 
   constructor() {
     this.loadPersistedSettings();
+    this.bindSystemThemeListener();
+  }
+
+  private bindSystemThemeListener() {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => {
+      if (this.preferences.themeMode === "system") {
+        const next = mq.matches ? "dark" : "light";
+        if (this.theme !== next) {
+          this.theme = next;
+          if (typeof document !== "undefined") {
+            document.documentElement.setAttribute("data-theme", next);
+          }
+          this.notify();
+        }
+      }
+    };
+    mq.addEventListener?.("change", onChange);
   }
 
   private loadPersistedSettings() {
@@ -49,8 +106,48 @@ class EditorState {
       if (savedSettings) {
         this.toolSettings = { ...this.toolSettings, ...JSON.parse(savedSettings) };
       }
+      const savedPrefs = localStorage.getItem("pdf_editor_preferences");
+      if (savedPrefs) {
+        this.preferences = { ...DEFAULT_PREFERENCES, ...JSON.parse(savedPrefs) };
+      } else {
+        const savedTheme = localStorage.getItem("pdf_editor_theme");
+        if (savedTheme === "light" || savedTheme === "dark" || savedTheme === "system") {
+          this.preferences.themeMode = savedTheme;
+        }
+        this.preferences.units = this.toolSettings.units;
+        this.preferences.author = this.toolSettings.author;
+      }
+      this.toolSettings.units = this.preferences.units;
+      this.toolSettings.author = this.preferences.author;
+      this.viewMode = this.preferences.defaultViewMode;
+      this.applyDefaultZoom();
+      this.theme = resolveEffectiveTheme(this.preferences.themeMode);
+      if (typeof document !== "undefined") {
+        document.documentElement.setAttribute("data-theme", this.theme);
+      }
     } catch {
       // Storage access gracefully handled
+    }
+  }
+
+  private applyDefaultZoom() {
+    if (this.preferences.defaultZoom === "fit-width") {
+      this.zoomFitMode = "fit-width";
+    } else if (this.preferences.defaultZoom === "fit-page") {
+      this.zoomFitMode = "fit-page";
+    } else {
+      this.zoomFitMode = "custom";
+      this.zoom = 1.0;
+    }
+  }
+
+  private persistPreferences() {
+    try {
+      localStorage.setItem("pdf_editor_preferences", JSON.stringify(this.preferences));
+      localStorage.setItem("pdf_editor_theme", this.preferences.themeMode);
+      localStorage.setItem("pdf_editor_tool_settings", JSON.stringify(this.toolSettings));
+    } catch {
+      // Storage fallback
     }
   }
 
@@ -76,8 +173,13 @@ class EditorState {
     this.doc = doc;
     this.selectedPages.clear();
     this.selectedAnnotationId = null;
+    this.pendingRedactions = [];
     this.currentPage = 0;
     this.cropBox = null;
+    if (doc) {
+      this.viewMode = this.preferences.defaultViewMode;
+      this.applyDefaultZoom();
+    }
     if (this.activeTool === "crop") this.initCropBoxForCurrentPage();
 
     if (doc?.file_path) {
@@ -150,9 +252,60 @@ class EditorState {
     this.notify();
   }
 
-  setZoom(zoom: number) {
-    this.zoom = Math.min(8.0, Math.max(0.1, zoom));
+  clearRecentFiles() {
+    this.recentFiles = [];
+    try {
+      localStorage.removeItem("pdf_editor_recent_files");
+    } catch {
+      // Storage fallback
+    }
     this.notify();
+  }
+
+  setSidebarTab(tab: SidebarTab) {
+    if (this.activeSidebarTab === tab) return;
+    this.activeSidebarTab = tab;
+    this.notify();
+  }
+
+  addPendingRedaction(item: AreaRedactItem) {
+    this.pendingRedactions = [...this.pendingRedactions, item];
+    this.notify();
+  }
+
+  removePendingRedaction(index: number) {
+    this.pendingRedactions = this.pendingRedactions.filter((_, i) => i !== index);
+    this.notify();
+  }
+
+  clearPendingRedactions() {
+    if (this.pendingRedactions.length === 0) return;
+    this.pendingRedactions = [];
+    this.notify();
+  }
+
+  setZoom(zoom: number, keepFitMode = false) {
+    this.zoom = Math.min(8.0, Math.max(0.1, zoom));
+    if (!keepFitMode) {
+      this.zoomFitMode = "custom";
+    }
+    this.notify();
+  }
+
+  requestFitWidth() {
+    this.zoomFitMode = "fit-width";
+    this.notify();
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("zoom-fit-width"));
+    }
+  }
+
+  requestFitPage() {
+    this.zoomFitMode = "fit-page";
+    this.notify();
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("zoom-fit-page"));
+    }
   }
 
   zoomIn() {
@@ -234,12 +387,21 @@ class EditorState {
 
   setTheme(theme: "light" | "dark") {
     this.theme = theme;
-    document.documentElement.setAttribute("data-theme", theme);
-    try {
-      localStorage.setItem("pdf_editor_theme", theme);
-    } catch {
-      // Storage fallback
+    this.preferences.themeMode = theme;
+    if (typeof document !== "undefined") {
+      document.documentElement.setAttribute("data-theme", theme);
     }
+    this.persistPreferences();
+    this.notify();
+  }
+
+  setThemeMode(mode: ThemeMode) {
+    this.preferences.themeMode = mode;
+    this.theme = resolveEffectiveTheme(mode);
+    if (typeof document !== "undefined") {
+      document.documentElement.setAttribute("data-theme", this.theme);
+    }
+    this.persistPreferences();
     this.notify();
   }
 
@@ -247,13 +409,48 @@ class EditorState {
     this.setTheme(this.theme === "light" ? "dark" : "light");
   }
 
+  updatePreferences(partial: Partial<EditorPreferences>) {
+    this.preferences = { ...this.preferences, ...partial };
+    if (partial.themeMode !== undefined) {
+      this.theme = resolveEffectiveTheme(this.preferences.themeMode);
+      if (typeof document !== "undefined") {
+        document.documentElement.setAttribute("data-theme", this.theme);
+      }
+    }
+    if (partial.units !== undefined) {
+      this.toolSettings = { ...this.toolSettings, units: partial.units };
+    }
+    if (partial.author !== undefined) {
+      this.toolSettings = { ...this.toolSettings, author: partial.author };
+    }
+    this.persistPreferences();
+    this.notify();
+  }
+
+  resetPreferences() {
+    this.preferences = { ...DEFAULT_PREFERENCES };
+    this.toolSettings = {
+      ...this.toolSettings,
+      units: DEFAULT_PREFERENCES.units,
+      author: DEFAULT_PREFERENCES.author,
+    };
+    this.theme = resolveEffectiveTheme(this.preferences.themeMode);
+    if (typeof document !== "undefined") {
+      document.documentElement.setAttribute("data-theme", this.theme);
+    }
+    this.persistPreferences();
+    this.notify();
+  }
+
   updateToolSettings(settings: Partial<ToolSettings>, render = true) {
     this.toolSettings = { ...this.toolSettings, ...settings };
-    try {
-      localStorage.setItem("pdf_editor_tool_settings", JSON.stringify(this.toolSettings));
-    } catch {
-      // Storage fallback
+    if (settings.units !== undefined) {
+      this.preferences.units = settings.units;
     }
+    if (settings.author !== undefined) {
+      this.preferences.author = settings.author;
+    }
+    this.persistPreferences();
     if (render) this.notify();
   }
 

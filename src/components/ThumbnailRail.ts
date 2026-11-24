@@ -25,14 +25,17 @@ export class ThumbnailRailView {
   }
 
   private render() {
+    const isEmbedded = this.element.classList.contains("sidebar-tab-panel");
     if (!editorState.doc) {
       this.raster?.reset();
       this.renderedDocument = null;
-      this.element.style.display = "none";
+      if (!isEmbedded) this.element.style.display = "none";
       return;
     }
-    this.element.style.display = "flex";
-    this.element.className = "thumbnail-rail";
+    if (!isEmbedded) {
+      this.element.style.display = "flex";
+      this.element.className = "thumbnail-rail";
+    }
 
     const doc = editorState.doc;
     const selectedCount = editorState.selectedPages.size;

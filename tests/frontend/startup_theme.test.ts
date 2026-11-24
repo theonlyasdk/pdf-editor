@@ -32,9 +32,11 @@ describe("first-paint theme", () => {
     expect(resolveTheme("light", true)).toBe("light");
   });
 
-  it("follows the OS on first launch or when storage is unavailable", () => {
+  it("follows the OS on first launch, system mode, or when storage is unavailable", () => {
     expect(resolveTheme(null, true)).toBe("dark");
     expect(resolveTheme(null, false)).toBe("light");
+    expect(resolveTheme("system", true)).toBe("dark");
+    expect(resolveTheme("system", false)).toBe("light");
     expect(resolveTheme("invalid", true)).toBe("dark");
     expect(resolveTheme(null, true, true)).toBe("dark");
   });
