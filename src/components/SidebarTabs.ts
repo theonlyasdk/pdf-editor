@@ -208,7 +208,10 @@ export class SidebarTabsView {
       return;
     }
     if (this.outlineError) {
-      this.outlinePanel.innerHTML = `<div class="sidebar-empty text-destructive">${this.outlineError}</div>`;
+      const errEl = document.createElement("div");
+      errEl.className = "sidebar-empty text-destructive";
+      errEl.textContent = this.outlineError;
+      this.outlinePanel.replaceChildren(errEl);
       return;
     }
     if (this.outlineItems.length === 0) {
