@@ -146,6 +146,7 @@ export const STRINGS = {
     themeDark: "Dark",
     defaultViewMode: "Default view mode",
     defaultZoom: "Default zoom",
+    smoothZoom: "Enable smooth zooming",
     units: "Measurement units",
     author: "Annotation author",
     saving: "Saving & History",

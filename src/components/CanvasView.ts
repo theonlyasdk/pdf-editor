@@ -35,11 +35,16 @@ export class CanvasViewportView {
   private cropOverlayPage: number | null = null;
   private shownCropBox: PageBox | null = null;
   private shownCropRatio = "";
+  private shownCropRotation = 0;
   private draw: { pointer: number; svg: SVGSVGElement; tool: ToolType; points: DrawPoint[] } | null = null;
   private committingDraw = false;
+  private smoothZoomRaf = 0;
+  private smoothZoomAnchor: { x: number; y: number } | null = null;
 
   // Interactive Crop State
   private isCtrlHeld = false;
+  private prevTool: ToolType = editorState.activeTool;
+  private cropHudDodged = false;
   private cropDrag: {
     pointer: number;
     handle: string;
@@ -98,6 +103,13 @@ export class CanvasViewportView {
 
     window.addEventListener("zoom-fit-width", () => this.applyFitZoom("fit-width"));
     window.addEventListener("zoom-fit-page", () => this.applyFitZoom("fit-page"));
+    window.addEventListener("crop-rotation-preview", (event) => {
+      const rotation = (event as CustomEvent<{ rotation: number }>).detail?.rotation ?? 0;
+      if (editorState.activeTool === "crop" && editorState.cropBox) {
+        this.applyCropRotationPreview(editorState.currentPage, editorState.cropBox, rotation);
+        this.updateCropHudAngle(rotation);
+      }
+    });
     window.addEventListener("pending-placement-changed", () => {
       if (!getPendingPlacement()) {
         this.pagesContainer.querySelectorAll(".pending-placement-ghost").forEach((el) => el.remove());
@@ -174,6 +186,7 @@ export class CanvasViewportView {
     const rebuild = this.layout !== layout;
     const zoomChanged = this.appliedZoom !== pageZoom;
     if (rebuild) {
+      this.cancelSmoothZoom();
       if (mode === "grid" && this.layout.split(":")[0] !== String(editorState.documentVersion)) this.gridZoom = null;
       this.layout = layout;
       this.cropOverlayPage = null;
@@ -183,28 +196,48 @@ export class CanvasViewportView {
         pages.appendChild(this.createPageElement(index, doc.pages[index], pageZoom));
       }
       this.pagesContainer.replaceChildren(pages);
+      this.appliedZoom = pageZoom;
     } else if (zoomChanged || this.rasterVersion !== editorState.rasterVersion) {
-      const focused = this.pagesContainer.querySelector<HTMLElement>(`#pdf-page-${editorState.currentPage}`);
-      const anchor = this.canvasZoomAnchor ?? { x: this.element.clientWidth / 2, y: this.element.clientHeight / 2 };
-      const viewport = this.element.getBoundingClientRect();
-      const before = focused?.getBoundingClientRect();
-      for (const frame of this.pagesContainer.children) {
-        const pageFrame = frame as HTMLElement;
-        this.updatePageFrame(pageFrame, doc.pages[Number(pageFrame.dataset.pageIndex)], pageZoom);
-      }
-      if (zoomChanged && before && focused && mode !== "grid") {
-        const after = focused.getBoundingClientRect();
-        const x = viewport.left + anchor.x;
-        const y = viewport.top + anchor.y;
-        this.element.scrollLeft += after.left + (x - before.left) * after.width / before.width - x;
-        this.element.scrollTop += after.top + (y - before.top) * after.height / before.height - y;
+      const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const shouldSmoothZoom =
+        zoomChanged &&
+        this.rasterVersion === editorState.rasterVersion &&
+        mode !== "grid" &&
+        editorState.preferences.smoothZoom &&
+        !this.applyingFitZoom &&
+        !reducedMotion &&
+        this.appliedZoom > 0;
+
+      if (shouldSmoothZoom) {
+        this.smoothZoomAnchor = this.canvasZoomAnchor ?? this.smoothZoomAnchor ?? { x: this.element.clientWidth / 2, y: this.element.clientHeight / 2 };
+        this.startSmoothZoom(pageZoom);
+      } else {
+        this.cancelSmoothZoom();
+        const focused = this.pagesContainer.querySelector<HTMLElement>(`#pdf-page-${editorState.currentPage}`);
+        const anchor = this.canvasZoomAnchor ?? { x: this.element.clientWidth / 2, y: this.element.clientHeight / 2 };
+        const viewport = this.element.getBoundingClientRect();
+        const before = focused?.getBoundingClientRect();
+        for (const frame of this.pagesContainer.children) {
+          const pageFrame = frame as HTMLElement;
+          this.updatePageFrame(pageFrame, doc.pages[Number(pageFrame.dataset.pageIndex)], pageZoom);
+        }
+        if (zoomChanged && before && focused && mode !== "grid") {
+          const after = focused.getBoundingClientRect();
+          const x = viewport.left + anchor.x;
+          const y = viewport.top + anchor.y;
+          this.element.scrollLeft += after.left + (x - before.left) * after.width / before.width - x;
+          this.element.scrollTop += after.top + (y - before.top) * after.height / before.height - y;
+        }
+        this.appliedZoom = pageZoom;
       }
       this.cropOverlayPage = null;
     }
     this.canvasZoomAnchor = null;
-    this.appliedZoom = pageZoom;
     this.rasterVersion = editorState.rasterVersion;
-    if (mode === "grid") this.updateGridZoom(zoom);
+    if (mode === "grid") {
+      this.pagesContainer.classList.toggle("smooth-zoom", editorState.preferences.smoothZoom && !this.gridDrag);
+      this.updateGridZoom(zoom);
+    }
 
     const selected = editorState.activeTool === "select"
       ? doc.annotations?.find(({ id }) => id === editorState.selectedAnnotationId) ?? null
@@ -226,15 +259,37 @@ export class CanvasViewportView {
     this.renderPendingRedactions();
     this.syncInteractionCursors();
 
+    const enteringCrop = editorState.activeTool === "crop" && this.prevTool !== "crop";
+    this.prevTool = editorState.activeTool;
+    if (enteringCrop) {
+      this.cropHudDodged = false;
+      const centerPage = this.findCenterViewportPage();
+      if (centerPage !== null && centerPage !== editorState.currentPage) {
+        editorState.setCurrentPage(centerPage);
+        return;
+      }
+    }
+
     const cropPage = editorState.activeTool === "crop" ? editorState.currentPage : null;
     const cropBox = editorState.cropBox;
     const ratio = editorState.toolSettings.cropRatioMode;
-    if (cropPage === this.cropOverlayPage && cropBox === this.shownCropBox && ratio === this.shownCropRatio) return;
+    const cropRotation = editorState.cropRotation;
+    this.applyCropRotationPreview(cropPage, cropBox, cropRotation);
+    if (
+      cropPage === this.cropOverlayPage &&
+      cropBox === this.shownCropBox &&
+      ratio === this.shownCropRatio &&
+      cropRotation === this.shownCropRotation
+    ) {
+      this.repositionActiveCropHud();
+      return;
+    }
     this.pagesContainer.querySelector(".crop-interactive-overlay")?.remove();
-    this.pagesContainer.querySelector(".crop-floating-hud")?.remove();
+    this.element.querySelector(".crop-floating-hud")?.remove();
     this.cropOverlayPage = cropPage;
     this.shownCropBox = cropBox;
     this.shownCropRatio = ratio;
+    this.shownCropRotation = cropRotation;
     if (cropPage === null || !cropBox) return;
 
     const wrapper = this.pagesContainer.querySelector<HTMLElement>(`#pdf-page-${cropPage}`);
@@ -377,6 +432,26 @@ export class CanvasViewportView {
     v2.setAttribute("class", "crop-grid-line");
     g.appendChild(v2);
 
+    if (Math.abs(editorState.cropRotation) >= 0.05) {
+      for (const frac of [0.166, 0.5, 0.833]) {
+        const sh = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        sh.setAttribute("x1", box.x.toString());
+        sh.setAttribute("y1", (box.y + box.height * frac).toString());
+        sh.setAttribute("x2", (box.x + box.width).toString());
+        sh.setAttribute("y2", (box.y + box.height * frac).toString());
+        sh.setAttribute("class", "crop-straighten-line");
+        g.appendChild(sh);
+
+        const sv = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        sv.setAttribute("x1", (box.x + box.width * frac).toString());
+        sv.setAttribute("y1", box.y.toString());
+        sv.setAttribute("x2", (box.x + box.width * frac).toString());
+        sv.setAttribute("y2", (box.y + box.height).toString());
+        sv.setAttribute("class", "crop-straighten-line");
+        g.appendChild(sv);
+      }
+    }
+
     // 4. Center Move Target
     const moveTarget = document.createElementNS("http://www.w3.org/2000/svg", "rect");
     moveTarget.setAttribute("x", box.x.toString());
@@ -452,27 +527,17 @@ export class CanvasViewportView {
       };
     });
 
-    // 7. Floating HUD / Action Bar attached to Crop Box
+    // 7. Floating HUD / Action Bar attached to viewport (never scaled with page/grid zoom)
     const isLocked = this.isCtrlHeld || editorState.toolSettings.cropRatioMode !== "free";
     const hud = document.createElement("div");
     hud.className = "crop-floating-hud";
 
-    const scaledHeight = Math.round(pageInfo.height * zoom);
-    const hudLeft = Math.round((box.x + box.width / 2) * zoom);
-    let hudTop = Math.round((box.y + box.height) * zoom) + 10;
-    // If overflowing below page, flip above
-    if (hudTop + 45 > scaledHeight) {
-      hudTop = Math.max(8, Math.round(box.y * zoom) - 45);
-    }
-
-    hud.style.left = `${hudLeft}px`;
-    hud.style.top = `${hudTop}px`;
-    hud.style.transform = "translateX(-50%)";
-
     const unit = editorState.toolSettings.units;
+    const cropRot = editorState.cropRotation;
     hud.innerHTML = `
       <div class="crop-hud-inner">
         <span class="crop-hud-dims">${formatUnitValue(box.width, unit)} × ${formatUnitValue(box.height, unit)} ${unit}</span>
+        <span class="crop-hud-angle" id="crop-hud-angle" ${Math.abs(cropRot) < 0.05 ? "hidden" : ""}>${cropRot > 0 ? "+" : ""}${cropRot.toFixed(1)}°</span>
         <span class="crop-hud-badge ${isLocked ? "locked" : ""}" id="crop-hud-ratio-tag">
           ${isLocked ? `Fixed ratio (${(box.width / Math.max(1, box.height)).toFixed(2)})` : "Free Ratio (Hold Ctrl to Lock)"}
         </span>
@@ -485,8 +550,91 @@ export class CanvasViewportView {
 
     hud.querySelector("#hud-crop-apply")?.addEventListener("click", () => this.applyActiveCrop());
     hud.querySelector("#hud-crop-cancel")?.addEventListener("click", () => this.cancelActiveCrop());
+    hud.addEventListener("pointerenter", () => {
+      if (this.cropDrag) return;
+      this.cropHudDodged = !this.cropHudDodged;
+      this.positionCropHud(hud, wrapper, pageInfo, editorState.cropBox ?? box);
+    });
 
-    wrapper.appendChild(hud);
+    this.element.appendChild(hud);
+    this.positionCropHud(hud, wrapper, pageInfo, box);
+  }
+
+  private findCenterViewportPage(): number | null {
+    const frames = this.pagesContainer.children;
+    if (!frames.length) return null;
+    const vp = this.element.getBoundingClientRect();
+    const cx = vp.left + vp.width / 2;
+    const cy = vp.top + vp.height / 2;
+    let bestPage: number | null = null;
+    let bestScore = Infinity;
+
+    for (const node of frames) {
+      const el = node as HTMLElement;
+      const idx = Number(el.dataset.pageIndex);
+      if (!Number.isFinite(idx)) continue;
+      const r = el.getBoundingClientRect();
+      const intersects = r.right >= vp.left && r.left <= vp.right && r.bottom >= vp.top && r.top <= vp.bottom;
+      const dist = Math.hypot(r.left + r.width / 2 - cx, r.top + r.height / 2 - cy);
+      const score = intersects ? dist : dist + 100_000;
+      if (score < bestScore) {
+        bestScore = score;
+        bestPage = idx;
+      }
+    }
+    return bestPage;
+  }
+
+  private positionCropHud(hud: HTMLElement, wrapper: HTMLElement, pageInfo: PageInfo, box: PageBox) {
+    const vp = this.element.getBoundingClientRect();
+    const wr = wrapper.getBoundingClientRect();
+    if (wr.width <= 0 || wr.height <= 0 || pageInfo.width <= 0 || pageInfo.height <= 0) return;
+
+    const scaleX = wr.width / pageInfo.width;
+    const scaleY = wr.height / pageInfo.height;
+    const boxLeft = wr.left + box.x * scaleX;
+    const boxTop = wr.top + box.y * scaleY;
+    const boxWidth = box.width * scaleX;
+    const boxBottom = boxTop + box.height * scaleY;
+
+    const hudW = hud.offsetWidth || 340;
+    const hudH = hud.offsetHeight || 38;
+    const gap = 10;
+
+    let left = boxLeft + boxWidth / 2 - hudW / 2;
+    left = Math.max(vp.left + 8, Math.min(vp.right - hudW - 8, left));
+
+    const belowTop = boxBottom + gap;
+    const aboveTop = boxTop - hudH - gap;
+    const fitsBelow = belowTop + hudH <= vp.bottom - 8;
+    const fitsAbove = aboveTop >= vp.top + 8;
+
+    let top = fitsBelow ? belowTop : fitsAbove ? aboveTop : Math.max(vp.top + 8, Math.min(vp.bottom - hudH - 8, belowTop));
+
+    if (this.cropHudDodged) {
+      if (top >= boxBottom) {
+        top = fitsAbove ? aboveTop : Math.max(vp.top + 8, boxTop + gap);
+      } else {
+        top = fitsBelow ? belowTop : Math.min(vp.bottom - hudH - 8, boxBottom - hudH - gap);
+      }
+      if (Math.abs(top - belowTop) < 4 && !fitsAbove) {
+        const shiftedLeft = boxLeft + boxWidth + gap;
+        left = shiftedLeft + hudW <= vp.right - 8 ? shiftedLeft : Math.max(vp.left + 8, boxLeft - hudW - gap);
+      }
+    }
+
+    hud.style.left = `${Math.round(left)}px`;
+    hud.style.top = `${Math.round(top)}px`;
+  }
+
+  private repositionActiveCropHud() {
+    if (editorState.activeTool !== "crop" || !editorState.doc || !editorState.cropBox) return;
+    const hud = this.element.querySelector<HTMLElement>(".crop-floating-hud");
+    const wrapper = this.pagesContainer.querySelector<HTMLElement>(`#pdf-page-${editorState.currentPage}`);
+    const pageInfo = editorState.doc.pages[editorState.currentPage];
+    if (hud && wrapper && pageInfo) {
+      this.positionCropHud(hud, wrapper, pageInfo, this.cropDrag?.preview ?? editorState.cropBox);
+    }
   }
 
   private bindGlobalCropEvents() {
@@ -562,7 +710,7 @@ export class CanvasViewportView {
       const ratio = mode === "free" ? (event.ctrlKey ? drag.box.width / drag.box.height : undefined) : ratios[mode];
       drag.preview = resizeCrop(drag.box, drag.handle, point.x - drag.start.x, point.y - drag.start.y, page, ratio);
       drag.svg.querySelector(".crop-interactive-overlay")?.remove();
-      wrapper.querySelector(".crop-floating-hud")?.remove();
+      this.element.querySelector(".crop-floating-hud")?.remove();
       this.renderCropOverlay(wrapper, drag.svg, page, wrapper.clientWidth / page.width, drag.preview);
     });
 
@@ -600,17 +748,117 @@ export class CanvasViewportView {
     if (!editorState.cropBox || !editorState.doc) return;
     try {
       const page = editorState.currentPage;
-      const updated = await Backend.cropPages([page], editorState.cropBox, editorState.toolSettings.cropRatioMode !== "free");
+      const rot = editorState.cropRotation;
+      const keepSize = editorState.cropKeepPageSize || editorState.toolSettings.cropRatioMode !== "free" || Math.abs(rot) >= 0.05;
+      const updated = await Backend.cropPages([page], editorState.cropBox, keepSize, rot);
+      this.applyCropRotationPreview(null, null, 0);
       editorState.updateDocument(updated);
-      editorState.setTool("select");
-      editorState.setCurrentPage(page);
+      if (editorState.viewMode === "grid") {
+        editorState.setCurrentPage(page);
+        editorState.initCropBoxForCurrentPage();
+        editorState.notify();
+      } else {
+        editorState.setTool("select");
+        editorState.setCurrentPage(page);
+      }
       toast.show({
-        message: `Crop applied to page ${page + 1}`,
+        message: `Crop${Math.abs(rot) >= 0.05 ? ` & ${rot.toFixed(1)}° rotation` : ""} applied to page ${page + 1}`,
         type: "success",
       });
     } catch (err: any) {
       toast.show({ message: err.toString(), type: "error" });
     }
+  }
+
+  private applyCropRotationPreview(cropPage: number | null, cropBox: PageBox | null, rotation: number) {
+    const active = cropPage !== null && cropBox !== null && Math.abs(rotation) >= 0.05;
+    for (const frame of this.pagesContainer.children) {
+      const el = frame as HTMLElement;
+      const idx = Number(el.dataset.pageIndex);
+      const img = el.querySelector<HTMLImageElement>(".pdf-page-canvas");
+      const page = editorState.doc?.pages[idx];
+      if (!img) continue;
+      if (active && idx === cropPage && cropBox && page && page.width > 0 && page.height > 0) {
+        const cxPct = ((cropBox.x + cropBox.width / 2) / page.width) * 100;
+        const cyPct = ((cropBox.y + cropBox.height / 2) / page.height) * 100;
+        img.style.transformOrigin = `${cxPct}% ${cyPct}%`;
+        img.style.transform = `rotate(${rotation}deg)`;
+      } else if (img.style.transform) {
+        img.style.transform = "";
+        img.style.transformOrigin = "";
+      }
+    }
+  }
+
+  private updateCropHudAngle(rotation: number) {
+    const badge = this.element.querySelector<HTMLElement>("#crop-hud-angle");
+    if (!badge) return;
+    if (Math.abs(rotation) < 0.05) {
+      badge.hidden = true;
+    } else {
+      badge.hidden = false;
+      badge.textContent = `${rotation > 0 ? "+" : ""}${rotation.toFixed(1)}°`;
+    }
+  }
+
+  private cancelSmoothZoom() {
+    if (this.smoothZoomRaf) {
+      cancelAnimationFrame(this.smoothZoomRaf);
+      this.smoothZoomRaf = 0;
+    }
+    this.smoothZoomAnchor = null;
+  }
+
+  private startSmoothZoom(targetZoom: number) {
+    if (this.smoothZoomRaf) return;
+    const step = () => {
+      this.smoothZoomRaf = 0;
+      const doc = editorState.doc;
+      if (!doc || editorState.viewMode === "grid") {
+        this.smoothZoomAnchor = null;
+        return;
+      }
+      const target = editorState.zoom;
+      const current = this.appliedZoom || target;
+      const diff = target - current;
+      const settled = Math.abs(diff) <= 0.002;
+      const nextZoom = settled ? target : current + diff * 0.28;
+
+      const focused = this.pagesContainer.querySelector<HTMLElement>(`#pdf-page-${editorState.currentPage}`);
+      const anchor = this.smoothZoomAnchor ?? { x: this.element.clientWidth / 2, y: this.element.clientHeight / 2 };
+      const viewport = this.element.getBoundingClientRect();
+      const before = focused?.getBoundingClientRect();
+
+      for (const frame of this.pagesContainer.children) {
+        const pageFrame = frame as HTMLElement;
+        const page = doc.pages[Number(pageFrame.dataset.pageIndex)];
+        if (settled) {
+          this.updatePageFrame(pageFrame, page, nextZoom);
+        } else {
+          pageFrame.style.width = `${Math.max(1, Math.round(page.width * nextZoom))}px`;
+          pageFrame.style.height = `${Math.max(1, Math.round(page.height * nextZoom))}px`;
+        }
+      }
+
+      if (before && focused) {
+        const after = focused.getBoundingClientRect();
+        const x = viewport.left + anchor.x;
+        const y = viewport.top + anchor.y;
+        this.element.scrollLeft += after.left + (x - before.left) * after.width / before.width - x;
+        this.element.scrollTop += after.top + (y - before.top) * after.height / before.height - y;
+      }
+
+      this.appliedZoom = nextZoom;
+      this.repositionActiveCropHud();
+
+      if (!settled) {
+        this.smoothZoomRaf = requestAnimationFrame(step);
+      } else {
+        this.smoothZoomAnchor = null;
+      }
+    };
+    this.smoothZoomRaf = requestAnimationFrame(step);
+    void targetZoom;
   }
 
   cancelActiveCrop() {
@@ -817,6 +1065,7 @@ export class CanvasViewportView {
   private writeGridTransform() {
     this.pagesContainer.style.transform =
       `translate(${this.gridOrigin.x}px, ${this.gridOrigin.y}px) scale(${this.gridZoom})`;
+    this.repositionActiveCropHud();
   }
 
   private updateGridZoom(zoom: number) {
@@ -849,6 +1098,7 @@ export class CanvasViewportView {
       event.preventDefault();
       this.element.setPointerCapture(event.pointerId);
       this.gridDrag = { pointer: event.pointerId, x: event.clientX, y: event.clientY, moved: false, page: page === undefined ? undefined : Number(page) };
+      this.pagesContainer.classList.remove("smooth-zoom");
       this.element.classList.add("grid-grabbing");
     });
     this.element.addEventListener("pointermove", (event) => {
@@ -874,6 +1124,9 @@ export class CanvasViewportView {
       if (!drag || drag.pointer !== event.pointerId) return;
       this.gridDrag = null;
       this.element.classList.remove("grid-grabbing");
+      if (editorState.viewMode === "grid") {
+        this.pagesContainer.classList.toggle("smooth-zoom", editorState.preferences.smoothZoom);
+      }
       if (event.type === "pointerup" && event.button === 0 && !drag.moved && drag.page !== undefined) {
         editorState.setCurrentPage(drag.page);
       }
@@ -899,6 +1152,7 @@ export class CanvasViewportView {
     }, { passive: false });
 
     this.element.addEventListener("scroll", () => {
+      this.repositionActiveCropHud();
       if (this.scrollFrame || editorState.viewMode !== "continuous" || this.cropDrag || this.draw) return;
       this.scrollFrame = requestAnimationFrame(() => {
         this.scrollFrame = 0;

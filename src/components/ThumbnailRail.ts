@@ -1,4 +1,4 @@
-import { Ellipsis } from "lucide";
+import { ArrowLeftRight, CheckSquare, Ellipsis, SquareDashed } from "lucide";
 import { icon } from "./ui/icon";
 import { showContextMenu, showPageMenu } from "./EditorContextMenu";
 import { DocumentDto } from "../types/editor";
@@ -17,11 +17,44 @@ export class ThumbnailRailView {
   private documentVersion = -1;
   private rasterVersion = -1;
   private activePage = -1;
+  private lastRasterWidth = 200;
+  private resizeTimer = 0;
+  private resizeObserver: ResizeObserver | null = null;
 
   constructor(element: HTMLElement) {
     this.element = element;
+    if (typeof ResizeObserver !== "undefined") {
+      this.resizeObserver = new ResizeObserver(() => this.handleResize());
+      this.resizeObserver.observe(this.element);
+    }
     this.render();
     editorState.subscribe(() => this.render());
+  }
+
+  private computeTargetRasterWidth(): number {
+    const sample = this.element.querySelector<HTMLElement>(".thumbnail-preview");
+    const width = sample?.clientWidth || Math.max(120, this.element.clientWidth - 40);
+    const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+    return Math.min(640, Math.max(180, Math.ceil((width * dpr) / 60) * 60));
+  }
+
+  private handleResize() {
+    if (!editorState.doc || !this.raster) return;
+    const nextWidth = this.computeTargetRasterWidth();
+    if (nextWidth <= this.lastRasterWidth + 40) return;
+    if (this.resizeTimer) window.clearTimeout(this.resizeTimer);
+    this.resizeTimer = window.setTimeout(() => {
+      this.resizeTimer = 0;
+      if (!editorState.doc || !this.raster) return;
+      const targetWidth = this.computeTargetRasterWidth();
+      this.lastRasterWidth = targetWidth;
+      for (const card of this.element.querySelectorAll<HTMLElement>(".thumbnail-card")) {
+        const index = Number(card.dataset.pageIndex);
+        const preview = card.querySelector<HTMLElement>(".thumbnail-preview");
+        const img = preview?.querySelector("img");
+        if (preview && img) this.raster.add(preview, img, index, targetWidth);
+      }
+    }, 120);
   }
 
   private render() {
@@ -49,7 +82,8 @@ export class ThumbnailRailView {
         const preview = card.querySelector<HTMLElement>(".thumbnail-preview")!;
         preview.style.aspectRatio = `${page.width} / ${page.height}`;
         card.querySelector(".thumbnail-detail")!.textContent = [page.rotation ? `${page.rotation}°` : "", page.crop_box ? "Cropped" : ""].filter(Boolean).join(" · ");
-        this.raster?.add(preview, preview.querySelector("img")!, index, 200);
+        this.lastRasterWidth = this.computeTargetRasterWidth();
+        this.raster?.add(preview, preview.querySelector("img")!, index, this.lastRasterWidth);
       }
     }
     if (!rebuilt) {
@@ -161,7 +195,8 @@ export class ThumbnailRailView {
       preview.style.aspectRatio = `${pageInfo.width} / ${pageInfo.height}`;
       preview.appendChild(img);
       card.appendChild(preview);
-      this.raster.add(preview, img, i, 200);
+      this.lastRasterWidth = this.computeTargetRasterWidth();
+      this.raster.add(preview, img, i, this.lastRasterWidth);
 
       // Drag and drop events for page reordering
       card.addEventListener("dragstart", (e) => {
@@ -237,9 +272,9 @@ export class ThumbnailRailView {
   private bindRailEvents() {
     this.element.querySelector<HTMLButtonElement>("#rail-selection-menu")?.addEventListener("click", (event) => {
       showContextMenu(event, "Page selection", [
-        { label: "Select all", run: () => editorState.selectAllPages() },
-        { label: "Invert selection", run: () => editorState.invertPageSelection() },
-        { label: "Clear selection", run: () => editorState.selectPageRange([]) },
+        { label: "Select all", icon: CheckSquare, run: () => editorState.selectAllPages() },
+        { label: "Invert selection", icon: ArrowLeftRight, run: () => editorState.invertPageSelection() },
+        { label: "Clear selection", icon: SquareDashed, run: () => editorState.selectPageRange([]) },
       ]);
     });
 

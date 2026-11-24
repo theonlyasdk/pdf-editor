@@ -253,6 +253,8 @@ export class PropertiesPanelView {
       };
       const ratioMode = settings.cropRatioMode;
       const step = unitStep(unit);
+      const cropRotation = editorState.cropRotation;
+      const keepPageSize = editorState.cropKeepPageSize || ratioMode !== "free" || Math.abs(cropRotation) >= 0.05;
 
       bodyHtml = `
         <div class="property-group">
@@ -264,13 +266,31 @@ export class PropertiesPanelView {
           </div>
           <select class="ui-input" id="prop-crop-ratio">
             <option value="free" ${ratioMode === "free" ? "selected" : ""}>Free crop</option>
-            <option value="original" ${ratioMode === "original" ? "selected" : ""}>Fixed ? Original page ratio</option>
+            <option value="original" ${ratioMode === "original" ? "selected" : ""}>Fixed · Original page ratio</option>
             <option value="1:1" ${ratioMode === "1:1" ? "selected" : ""}>Square (1:1)</option>
             <option value="4:3" ${ratioMode === "4:3" ? "selected" : ""}>Standard (4:3)</option>
             <option value="16:9" ${ratioMode === "16:9" ? "selected" : ""}>Widescreen (16:9)</option>
           </select>
+          <label class="ui-check mt-1">
+            <input type="checkbox" id="prop-crop-keep-size" ${keepPageSize ? "checked" : ""} ${ratioMode !== "free" || Math.abs(cropRotation) >= 0.05 ? "disabled" : ""} />
+            <span class="text-xs">Keep document page size</span>
+          </label>
           <div class="text-muted-foreground text-xs" style="font-size: 11px;">
-            Fixed ratios scale the crop to fit the original page size. Hold <kbd>Ctrl</kbd> to lock the ratio while dragging in free mode.
+            Fixed ratios or rotation scale the crop to keep the original page size. Hold <kbd>Ctrl</kbd> to lock ratio while dragging.
+          </div>
+        </div>
+
+        <div class="property-group">
+          <div class="flex justify-between items-center mb-1">
+            <label class="property-label mb-0" for="prop-crop-rotation">Straighten / Rotate</label>
+            <span class="tabular-nums text-xs font-semibold" id="prop-crop-rot-val">${cropRotation > 0 ? "+" : ""}${cropRotation.toFixed(1)}°</span>
+          </div>
+          <input type="range" class="ui-slider" id="prop-crop-rotation" min="-45" max="45" step="0.1" value="${cropRotation}" />
+          <div class="flex items-center gap-1 mt-1">
+            <input type="number" class="ui-input tabular-nums" id="prop-crop-rotation-num" min="-180" max="180" step="0.1" value="${cropRotation.toFixed(1)}" aria-label="Rotation degrees" />
+            <button type="button" class="ui-button ui-button--outline ui-button--sm" id="btn-crop-rot-ccw" title="Rotate -90°">-90°</button>
+            <button type="button" class="ui-button ui-button--outline ui-button--sm" id="btn-crop-rot-reset" title="Reset rotation">0°</button>
+            <button type="button" class="ui-button ui-button--outline ui-button--sm" id="btn-crop-rot-cw" title="Rotate +90°">+90°</button>
           </div>
         </div>
 
@@ -706,6 +726,47 @@ export class PropertiesPanelView {
       }
     });
 
+    const keepSizeCheck = this.element.querySelector<HTMLInputElement>("#prop-crop-keep-size");
+    keepSizeCheck?.addEventListener("change", () => {
+      editorState.setCropKeepPageSize(keepSizeCheck.checked);
+    });
+
+    const rotSlider = this.element.querySelector<HTMLInputElement>("#prop-crop-rotation");
+    const rotNum = this.element.querySelector<HTMLInputElement>("#prop-crop-rotation-num");
+    const rotValLabel = this.element.querySelector<HTMLElement>("#prop-crop-rot-val");
+    const applyRotPreview = (deg: number, commit: boolean) => {
+      const clamped = Math.max(-180, Math.min(180, Math.round(deg * 10) / 10));
+      if (rotValLabel) rotValLabel.textContent = `${clamped > 0 ? "+" : ""}${clamped.toFixed(1)}°`;
+      if (rotSlider && Math.abs(clamped) <= 45) rotSlider.value = String(clamped);
+      if (rotNum && document.activeElement !== rotNum) rotNum.value = clamped.toFixed(1);
+      if (commit) {
+        editorState.setCropRotation(clamped);
+      } else {
+        editorState.cropRotation = clamped;
+        window.dispatchEvent(new CustomEvent("crop-rotation-preview", { detail: { rotation: clamped } }));
+      }
+    };
+    rotSlider?.addEventListener("input", () => applyRotPreview(rotSlider.valueAsNumber, false));
+    rotSlider?.addEventListener("change", () => applyRotPreview(rotSlider.valueAsNumber, true));
+    rotNum?.addEventListener("change", () => {
+      if (Number.isFinite(rotNum.valueAsNumber)) applyRotPreview(rotNum.valueAsNumber, true);
+    });
+    rotNum?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && Number.isFinite(rotNum.valueAsNumber)) {
+        event.preventDefault();
+        applyRotPreview(rotNum.valueAsNumber, true);
+      }
+    });
+    this.element.querySelector("#btn-crop-rot-ccw")?.addEventListener("click", () => {
+      editorState.setCropRotation(editorState.cropRotation - 90);
+    });
+    this.element.querySelector("#btn-crop-rot-reset")?.addEventListener("click", () => {
+      editorState.setCropRotation(0);
+    });
+    this.element.querySelector("#btn-crop-rot-cw")?.addEventListener("click", () => {
+      editorState.setCropRotation(editorState.cropRotation + 90);
+    });
+
     const cropWInput = this.element.querySelector("#prop-crop-w") as HTMLInputElement | null;
     const cropHInput = this.element.querySelector("#prop-crop-h") as HTMLInputElement | null;
     const cropXInput = this.element.querySelector("#prop-crop-x") as HTMLInputElement | null;
@@ -838,12 +899,20 @@ export class PropertiesPanelView {
 
       try {
         const page = editorState.currentPage;
-        const updated = await Backend.cropPages(targetPages, editorState.cropBox, editorState.toolSettings.cropRatioMode !== "free");
+        const rot = editorState.cropRotation;
+        const keepSize = editorState.cropKeepPageSize || editorState.toolSettings.cropRatioMode !== "free" || Math.abs(rot) >= 0.05;
+        const updated = await Backend.cropPages(targetPages, editorState.cropBox, keepSize, rot);
         editorState.updateDocument(updated);
-        editorState.setTool("select");
-        editorState.setCurrentPage(page);
+        if (editorState.viewMode === "grid") {
+          editorState.setCurrentPage(page);
+          editorState.initCropBoxForCurrentPage();
+          editorState.notify();
+        } else {
+          editorState.setTool("select");
+          editorState.setCurrentPage(page);
+        }
         toast.show({
-          message: `Crop applied to ${targetPages.length} page(s).`,
+          message: `Crop${Math.abs(rot) >= 0.05 ? ` & ${rot.toFixed(1)}° rotation` : ""} applied to ${targetPages.length} page(s).`,
           type: "success",
         });
       } catch (err: any) {

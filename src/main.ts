@@ -13,6 +13,7 @@ import { SidebarTabsView } from "./components/SidebarTabs";
 import { toast } from "./components/Toast";
 import { ToolbarView } from "./components/Toolbar";
 import { guardedOpenPdf, initWindowCloseGuard } from "./components/UnsavedGuard";
+import { initCustomSelects } from "./components/ui/Select";
 import { Backend } from "./ipc/backend";
 import { editorState } from "./state/editorState";
 
@@ -240,6 +241,7 @@ async function revealWindow() {
 
 document.addEventListener("DOMContentLoaded", () => {
   toast.init();
+  initCustomSelects();
 
   const headerEl = document.getElementById("app-header")!;
   const toolbarEl = document.getElementById("action-toolbar")!;

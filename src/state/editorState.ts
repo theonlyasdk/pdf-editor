@@ -19,6 +19,7 @@ export const DEFAULT_PREFERENCES: EditorPreferences = {
   themeMode: "system",
   defaultViewMode: "continuous",
   defaultZoom: "100%",
+  smoothZoom: false,
   units: "pt",
   author: "User",
   makeBackup: true,
@@ -51,6 +52,9 @@ class EditorState {
     typeof document !== "undefined" && document.documentElement.dataset.theme === "dark" ? "dark" : "light";
   recentFiles: string[] = [];
   cropBox: PageBox | null = null;
+  cropRotation: number = 0;
+  cropKeepPageSize: boolean = false;
+  sidebarWidth: number = 216;
   openingFile: string | null = null;
   documentVersion = 0;
   rasterVersion = 0;
@@ -111,6 +115,10 @@ class EditorState {
         this.preferences = { ...DEFAULT_PREFERENCES, ...JSON.parse(savedPrefs) };
       } else {
         const savedTheme = localStorage.getItem("pdf_editor_theme");
+      const savedWidth = Number(localStorage.getItem("pdf_editor_sidebar_width"));
+      if (Number.isFinite(savedWidth) && savedWidth >= 160 && savedWidth <= 440) {
+        this.sidebarWidth = Math.round(savedWidth);
+      }
         if (savedTheme === "light" || savedTheme === "dark" || savedTheme === "system") {
           this.preferences.themeMode = savedTheme;
         }
@@ -216,6 +224,35 @@ class EditorState {
     const page = this.doc.pages[this.currentPage];
     if (page) {
       this.cropBox = { x: 0, y: 0, width: page.width, height: page.height };
+      this.cropRotation = 0;
+    }
+  }
+
+  setCropRotation(deg: number) {
+    const clamped = Math.max(-180, Math.min(180, Math.round(deg * 10) / 10));
+    if (this.cropRotation === clamped) return;
+    this.cropRotation = clamped;
+    this.notify();
+  }
+
+  setCropKeepPageSize(keep: boolean) {
+    if (this.cropKeepPageSize === keep) return;
+    this.cropKeepPageSize = keep;
+    this.notify();
+  }
+
+  setSidebarWidth(width: number, persist = true) {
+    const clamped = Math.max(160, Math.min(440, Math.round(width)));
+    if (this.sidebarWidth !== clamped) {
+      this.sidebarWidth = clamped;
+    }
+    if (persist) {
+      try {
+        localStorage.setItem("pdf_editor_sidebar_width", String(clamped));
+      } catch {
+        // Storage fallback
+      }
+      this.notify();
     }
   }
 

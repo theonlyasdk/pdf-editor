@@ -32,6 +32,7 @@ describe("Preferences, Navigation & Workspace State", () => {
       themeMode: "dark",
       defaultViewMode: "spread",
       defaultZoom: "fit-width",
+      smoothZoom: true,
       units: "mm",
       author: "Alice",
       makeBackup: false,
@@ -41,6 +42,7 @@ describe("Preferences, Navigation & Workspace State", () => {
     expect(editorState.theme).toBe("dark");
     expect(editorState.preferences.defaultViewMode).toBe("spread");
     expect(editorState.preferences.defaultZoom).toBe("fit-width");
+    expect(editorState.preferences.smoothZoom).toBe(true);
     expect(editorState.toolSettings.units).toBe("mm");
     expect(editorState.toolSettings.author).toBe("Alice");
     expect(editorState.preferences.makeBackup).toBe(false);
@@ -114,5 +116,19 @@ describe("Preferences, Navigation & Workspace State", () => {
     expect(KEYBOARD_SHORTCUTS.length).toBeGreaterThan(10);
     expect(KEYBOARD_SHORTCUTS.some((s) => s.keys === "Ctrl+,")).toBe(true);
     expect(KEYBOARD_SHORTCUTS.some((s) => s.keys === "Ctrl+K")).toBe(true);
+  });
+
+  it("clamps cropRotation and sidebarWidth cleanly", () => {
+    editorState.setCropRotation(1.44);
+    expect(editorState.cropRotation).toBe(1.4);
+    editorState.setCropRotation(500);
+    expect(editorState.cropRotation).toBe(180);
+    editorState.initCropBoxForCurrentPage();
+    expect(editorState.cropRotation).toBe(0);
+
+    editorState.setSidebarWidth(80, false);
+    expect(editorState.sidebarWidth).toBe(160);
+    editorState.setSidebarWidth(900, false);
+    expect(editorState.sidebarWidth).toBe(440);
   });
 });

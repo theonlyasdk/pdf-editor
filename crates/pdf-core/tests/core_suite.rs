@@ -339,3 +339,34 @@ fn fixed_crop_scales_contents_and_annotations_without_changing_page_size() {
     commands.redo(&mut doc).unwrap();
     assert_eq!(doc.doc.get_page_content(id), content);
 }
+
+#[test]
+fn crop_with_rotation_preserves_page_size_and_is_undoable() {
+    use pdf_core::resize_crop::ResizeCropPages;
+
+    let mut doc = DocumentState::new_blank(100.0, 200.0).unwrap();
+    let id = doc.get_page_id(0).unwrap();
+    doc.doc
+        .add_page_contents(id, b"10 30 10 10 re f".to_vec())
+        .unwrap();
+
+    let mut commands = CommandManager::new();
+    let crop = PageBox::new(10.0, 20.0, 80.0, 160.0);
+    commands
+        .execute(
+            &mut doc,
+            Box::new(ResizeCropPages::with_rotation(vec![(0, crop, 2.5)])),
+        )
+        .unwrap();
+
+    let page = doc.get_page_info(0).unwrap();
+    assert_eq!((page.width, page.height, page.crop_box), (100.0, 200.0, None));
+    let content_bytes = doc.doc.get_page_content(id);
+    let text = String::from_utf8_lossy(&content_bytes);
+    assert!(text.contains("cm"), "expected transformation matrix in content: {text}");
+
+    commands.undo(&mut doc).unwrap();
+    let restored_bytes = doc.doc.get_page_content(id);
+    let restored = String::from_utf8_lossy(&restored_bytes);
+    assert!(!restored.contains("cm"));
+}

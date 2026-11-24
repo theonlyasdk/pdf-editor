@@ -89,6 +89,11 @@ export class PreferencesModalView {
               </select>
             </div>
 
+            <label class="ui-check prefs-check">
+              <input type="checkbox" id="prefs-smooth-zoom" ${prefs.smoothZoom ? "checked" : ""} />
+              <span>${STRINGS.preferences.smoothZoom}</span>
+            </label>
+
             <div class="prefs-row">
               <label class="prefs-label" for="prefs-units">${STRINGS.preferences.units}</label>
               <select class="ui-input" id="prefs-units">
@@ -167,6 +172,10 @@ export class PreferencesModalView {
       if (defaultZoom === "fit-width") editorState.requestFitWidth();
       else if (defaultZoom === "fit-page") editorState.requestFitPage();
       else editorState.setZoom(1.0);
+    });
+
+    this.dialog.querySelector<HTMLInputElement>("#prefs-smooth-zoom")?.addEventListener("change", (e) => {
+      editorState.updatePreferences({ smoothZoom: (e.target as HTMLInputElement).checked });
     });
 
     this.dialog.querySelector<HTMLSelectElement>("#prefs-units")?.addEventListener("change", (e) => {

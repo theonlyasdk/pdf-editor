@@ -1,7 +1,23 @@
+import {
+  ArrowUpRight,
+  Copy,
+  Crop,
+  FilePlus2,
+  Hand,
+  MousePointer2,
+  RotateCcw,
+  RotateCw,
+  Search,
+  Trash2,
+  ZoomIn,
+  ZoomOut,
+  type IconNode,
+} from "lucide";
 import { STRINGS } from "../i18n/strings";
 import { Backend } from "../ipc/backend";
 import { editorState } from "../state/editorState";
 import { toast } from "./Toast";
+import { icon } from "./ui/icon";
 import type { AnnotationDto, DocumentDto } from "../types/editor";
 
 interface MenuAction {
@@ -10,6 +26,7 @@ interface MenuAction {
   disabled?: boolean;
   destructive?: boolean;
   color?: string;
+  icon?: IconNode;
 }
 
 let closeOpenMenu: (() => void) | null = null;
@@ -42,6 +59,12 @@ export function showContextMenu(event: MouseEvent, title: string, actions: MenuA
     button.setAttribute("role", "menuitem");
     button.disabled = Boolean(action.disabled);
     if (action.destructive) button.classList.add("text-destructive");
+    if (action.icon) {
+      const iconWrap = document.createElement("span");
+      iconWrap.className = "context-menu-icon";
+      iconWrap.innerHTML = icon(action.icon, 14);
+      button.appendChild(iconWrap);
+    }
     if (action.color) {
       const swatch = document.createElement("span");
       swatch.className = "context-menu-swatch";
@@ -99,25 +122,29 @@ export function showToolMenu(event: MouseEvent, page?: number, annotation?: Anno
     }
   }
   if (tool === "crop") {
-    actions.push({ label: "Reset crop to full page", run: () => {
-      editorState.initCropBoxForCurrentPage();
-      editorState.notify();
-    } });
+    actions.push({
+      label: "Reset crop to full page",
+      icon: Crop,
+      run: () => {
+        editorState.initCropBoxForCurrentPage();
+        editorState.notify();
+      },
+    });
   }
   actions.push(
-    { label: "Select tool", disabled: tool === "select", run: () => editorState.setTool("select") },
-    { label: "Hand tool", disabled: tool === "hand", run: () => editorState.setTool("hand") },
-    { label: "Find in document", run: () => { window.dispatchEvent(new Event("open-document-search")); } },
-    { label: "Zoom in", run: () => editorState.zoomIn() },
-    { label: "Zoom out", run: () => editorState.zoomOut() },
+    { label: "Select tool", icon: MousePointer2, disabled: tool === "select", run: () => editorState.setTool("select") },
+    { label: "Hand tool", icon: Hand, disabled: tool === "hand", run: () => editorState.setTool("hand") },
+    { label: "Find in document", icon: Search, run: () => { window.dispatchEvent(new Event("open-document-search")); } },
+    { label: "Zoom in", icon: ZoomIn, run: () => editorState.zoomIn() },
+    { label: "Zoom out", icon: ZoomOut, run: () => editorState.zoomOut() },
   );
   if (annotation) actions.unshift({
-    label: "Delete annotation", destructive: true, run: async () => {
+    label: "Delete annotation", icon: Trash2, destructive: true, run: async () => {
       const updated = await Backend.deleteAnnotation(annotation.page_index, annotation.id);
       editorState.updateDocument(updated);
     },
   });
-  if (page !== undefined) actions.push({ label: `Go to page ${page + 1}`, run: () => jumpToPage(page) });
+  if (page !== undefined) actions.push({ label: `Go to page ${page + 1}`, icon: ArrowUpRight, run: () => jumpToPage(page) });
   showContextMenu(event, STRINGS.tools[tool], actions);
 }
 
@@ -136,12 +163,12 @@ export function showPageMenu(event: MouseEvent, page: number) {
     if (editorState.documentVersion === version) editorState.updateDocument(updated);
   };
   showContextMenu(event, targets.length === 1 ? `Page ${page + 1}` : `${targets.length} selected pages`, [
-    { label: "Go to page", run: () => jumpToPage(page) },
-    { label: "Rotate left", run: () => apply(Backend.rotatePages(targets, -90)) },
-    { label: "Rotate right", run: () => apply(Backend.rotatePages(targets, 90)) },
-    { label: "Duplicate", run: () => apply(Backend.duplicatePages(targets)) },
-    { label: "Insert blank page after", run: () => apply(Backend.insertBlankPage(page + 1, doc.pages[page].width, doc.pages[page].height)) },
-    { label: "Crop page", run: () => { jumpToPage(page); editorState.setTool("crop"); } },
-    { label: "Delete", disabled: targets.length >= doc.page_count, destructive: true, run: () => apply(Backend.deletePages(targets)) },
+    { label: "Go to page", icon: ArrowUpRight, run: () => jumpToPage(page) },
+    { label: "Rotate left", icon: RotateCcw, run: () => apply(Backend.rotatePages(targets, -90)) },
+    { label: "Rotate right", icon: RotateCw, run: () => apply(Backend.rotatePages(targets, 90)) },
+    { label: "Duplicate", icon: Copy, run: () => apply(Backend.duplicatePages(targets)) },
+    { label: "Insert blank page after", icon: FilePlus2, run: () => apply(Backend.insertBlankPage(page + 1, doc.pages[page].width, doc.pages[page].height)) },
+    { label: "Crop page", icon: Crop, run: () => { jumpToPage(page); editorState.setTool("crop"); } },
+    { label: "Delete", icon: Trash2, disabled: targets.length >= doc.page_count, destructive: true, run: () => apply(Backend.deletePages(targets)) },
   ]);
 }

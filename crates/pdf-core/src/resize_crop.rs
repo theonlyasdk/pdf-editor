@@ -5,13 +5,17 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Object, ObjectId, Stream};
 
 pub struct ResizeCropPages {
-    pages: Vec<(usize, PageBox)>,
+    pages: Vec<(usize, PageBox, f64)>,
     previous: Vec<(ObjectId, Dictionary)>,
     added: Vec<ObjectId>,
 }
 
 impl ResizeCropPages {
     pub fn new(pages: Vec<(usize, PageBox)>) -> Self {
+        Self::with_rotation(pages.into_iter().map(|(i, b)| (i, b, 0.0)).collect())
+    }
+
+    pub fn with_rotation(pages: Vec<(usize, PageBox, f64)>) -> Self {
         Self {
             pages,
             previous: Vec::new(),
@@ -23,8 +27,8 @@ impl ResizeCropPages {
 impl DocumentCommand for ResizeCropPages {
     fn execute(&mut self, document: &mut DocumentState) -> Result<(), CoreError> {
         for target in 0..self.pages.len() {
-            let (index, crop) = self.pages[target];
-            if let Err(error) = self.resize_page(document, index, crop) {
+            let (index, crop, rotation_deg) = self.pages[target];
+            if let Err(error) = self.resize_page(document, index, crop, rotation_deg) {
                 self.undo(document)?;
                 return Err(error);
             }
@@ -53,12 +57,13 @@ impl ResizeCropPages {
         document: &mut DocumentState,
         index: usize,
         crop: PageBox,
+        rotation_deg: f64,
     ) -> Result<(), CoreError> {
         let info = document.get_page_info(index)?;
         let visible = info
             .viewport_crop(PageBox::new(0.0, 0.0, info.width, info.height))
             .ok_or_else(|| CoreError::InvalidOperation("Page has no visible area".into()))?;
-        if crop == visible {
+        if crop == visible && rotation_deg.abs() < 1e-4 {
             return Ok(());
         }
 
@@ -69,8 +74,21 @@ impl ResizeCropPages {
         let height = crop.height * scale;
         let x = visible.x + (visible.width - width) / 2.0;
         let y = visible.y + (visible.height - height) / 2.0;
-        let tx = x - crop.x * scale;
-        let ty = y - crop.y * scale;
+        let dest_cx = visible.x + visible.width / 2.0;
+        let dest_cy = visible.y + visible.height / 2.0;
+        let crop_cx = crop.x + crop.width / 2.0;
+        let crop_cy = crop.y + crop.height / 2.0;
+
+        let (a, b, c, d) = if rotation_deg.abs() < 1e-4 {
+            (scale, 0.0, 0.0, scale)
+        } else {
+            let phi = -rotation_deg.to_radians();
+            let ca = scale * phi.cos();
+            let sa = scale * phi.sin();
+            (ca, sa, -sa, ca)
+        };
+        let tx = dest_cx - (a * crop_cx + c * crop_cy);
+        let ty = dest_cy - (b * crop_cx + d * crop_cy);
 
         let mut before = Content {
             operations: vec![
@@ -81,10 +99,10 @@ impl ResizeCropPages {
                 Operation::new(
                     "cm",
                     vec![
-                        scale.into(),
-                        0.into(),
-                        0.into(),
-                        scale.into(),
+                        a.into(),
+                        b.into(),
+                        c.into(),
+                        d.into(),
                         tx.into(),
                         ty.into(),
                     ],
@@ -108,7 +126,7 @@ impl ResizeCropPages {
                             Object::Dictionary(dict) => (None, dict),
                             _ => return None,
                         };
-                        scale_annotation(dict.clone(), crop, scale, tx, ty).map(|dict| (id, dict))
+                        scale_annotation(dict.clone(), crop, a, b, c, d, tx, ty).map(|dict| (id, dict))
                     })
                     .collect::<Vec<_>>()
             });
@@ -155,7 +173,10 @@ impl ResizeCropPages {
 fn scale_annotation(
     mut annotation: Dictionary,
     crop: PageBox,
-    scale: f64,
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
     tx: f64,
     ty: f64,
 ) -> Option<Dictionary> {
@@ -174,18 +195,61 @@ fn scale_annotation(
         return None;
     }
 
-    let transform = |list: &Vec<Object>| -> Option<Vec<Object>> {
-        list.iter()
-            .enumerate()
-            .map(|(index, value)| {
-                let offset = if index % 2 == 0 { tx } else { ty };
-                Some(Object::from(
-                    f64::from(value.as_float().ok()?) * scale + offset,
-                ))
-            })
-            .collect()
+    let apply_pt = |px: f64, py: f64| -> (f64, f64) {
+        (a * px + c * py + tx, b * px + d * py + ty)
     };
-    for key in ["Rect", "QuadPoints", "L", "Vertices", "CL"] {
+
+    if let Some(rect_arr) = annotation
+        .get(b"Rect")
+        .ok()
+        .and_then(|value| value.as_array().ok())
+    {
+        if let Some(coords) = rect_arr
+            .iter()
+            .map(|v| v.as_float().ok().map(f64::from))
+            .collect::<Option<Vec<_>>>()
+        {
+            if coords.len() >= 4 {
+                let corners = [
+                    apply_pt(coords[0], coords[1]),
+                    apply_pt(coords[2], coords[1]),
+                    apply_pt(coords[2], coords[3]),
+                    apply_pt(coords[0], coords[3]),
+                ];
+                let min_x = corners.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+                let min_y = corners.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+                let max_x = corners.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
+                let max_y = corners.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+                annotation.set(
+                    "Rect",
+                    vec![
+                        Object::from(min_x),
+                        Object::from(min_y),
+                        Object::from(max_x),
+                        Object::from(max_y),
+                    ],
+                );
+            }
+        }
+    }
+
+    let transform = |list: &Vec<Object>| -> Option<Vec<Object>> {
+        let coords = list
+            .iter()
+            .map(|value| value.as_float().ok().map(f64::from))
+            .collect::<Option<Vec<_>>>()?;
+        let mut out = Vec::with_capacity(coords.len());
+        for pair in coords.chunks_exact(2) {
+            let (nx, ny) = apply_pt(pair[0], pair[1]);
+            out.push(Object::from(nx));
+            out.push(Object::from(ny));
+        }
+        if coords.len() % 2 == 1 {
+            out.push(Object::from(coords[coords.len() - 1]));
+        }
+        Some(out)
+    };
+    for key in ["QuadPoints", "L", "Vertices", "CL"] {
         if let Some(list) = annotation
             .get(key.as_bytes())
             .ok()

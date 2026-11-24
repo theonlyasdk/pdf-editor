@@ -309,6 +309,7 @@ pub fn crop_pages(
     pages: Vec<usize>,
     crop_box: Option<PageBox>,
     keep_page_size: Option<bool>,
+    rotation_deg: Option<f64>,
     state: State<'_, SharedState>,
 ) -> Result<DocumentDto, String> {
     let mut lock = state.lock();
@@ -328,12 +329,14 @@ pub fn crop_pages(
             .transpose()?;
         new_boxes.push(new_box);
     }
-    if keep_page_size == Some(true) && crop_box.is_some() {
+    let rot = rotation_deg.unwrap_or(0.0);
+    if (keep_page_size == Some(true) || rot.abs() >= 1e-4) && crop_box.is_some() {
         let targets = pages
             .into_iter()
             .zip(new_boxes.into_iter().flatten())
+            .map(|(page, rect)| (page, rect, rot))
             .collect();
-        lock.execute_cmd(Box::new(pdf_core::resize_crop::ResizeCropPages::new(
+        lock.execute_cmd(Box::new(pdf_core::resize_crop::ResizeCropPages::with_rotation(
             targets,
         )))
         .map_err(|error| error.to_string())?;

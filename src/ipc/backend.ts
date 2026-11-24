@@ -81,8 +81,8 @@ export const Backend = {
     return callIpc<DocumentDto>("rotate_pages", { pages, deltaDeg });
   },
 
-  async cropPages(pages: number[], cropBox: PageBox | null, keepPageSize = false): Promise<DocumentDto> {
-    return callIpc<DocumentDto>("crop_pages", { pages, cropBox, keepPageSize });
+  async cropPages(pages: number[], cropBox: PageBox | null, keepPageSize = false, rotationDeg = 0): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("crop_pages", { pages, cropBox, keepPageSize, rotationDeg });
   },
 
   async deletePages(pages: number[]): Promise<DocumentDto> {

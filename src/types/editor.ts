@@ -151,6 +151,7 @@ export interface EditorPreferences {
   themeMode: ThemeMode;
   defaultViewMode: ViewMode;
   defaultZoom: DefaultZoomMode;
+  smoothZoom: boolean;
   units: MeasurementUnit;
   author: string;
   makeBackup: boolean;

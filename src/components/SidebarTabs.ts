@@ -97,11 +97,59 @@ export class SidebarTabsView {
     this.outlinePanel = this.createPanel("outline");
     this.annotationsPanel = this.createPanel("annotations");
 
-    this.element.replaceChildren(tablist, this.thumbnailsPanel, this.outlinePanel, this.annotationsPanel);
+    const resizer = document.createElement("div");
+    resizer.className = "sidebar-resizer";
+    resizer.setAttribute("role", "separator");
+    resizer.setAttribute("aria-orientation", "vertical");
+    resizer.setAttribute("aria-label", "Resize sidebar");
+    resizer.tabIndex = 0;
+
+    this.element.replaceChildren(tablist, this.thumbnailsPanel, this.outlinePanel, this.annotationsPanel, resizer);
     new ThumbnailRailView(this.thumbnailsPanel);
+    this.bindResizer(resizer);
 
     this.render();
     editorState.subscribe(() => this.render());
+  }
+
+  private bindResizer(resizer: HTMLElement) {
+    let drag: { pointerId: number; startX: number; startWidth: number } | null = null;
+    resizer.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      resizer.setPointerCapture(e.pointerId);
+      drag = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startWidth: this.element.getBoundingClientRect().width || editorState.sidebarWidth,
+      };
+      this.element.classList.add("resizing");
+    });
+    resizer.addEventListener("pointermove", (e) => {
+      if (!drag || e.pointerId !== drag.pointerId) return;
+      const next = Math.max(160, Math.min(440, Math.round(drag.startWidth + (e.clientX - drag.startX))));
+      this.element.style.width = `${next}px`;
+      editorState.setSidebarWidth(next, false);
+    });
+    const finish = (e: PointerEvent) => {
+      if (!drag || e.pointerId !== drag.pointerId) return;
+      const next = Math.max(160, Math.min(440, Math.round(drag.startWidth + (e.clientX - drag.startX))));
+      drag = null;
+      this.element.classList.remove("resizing");
+      editorState.setSidebarWidth(next, true);
+    };
+    resizer.addEventListener("pointerup", finish);
+    resizer.addEventListener("pointercancel", finish);
+    resizer.addEventListener("keydown", (e) => {
+      const step = e.shiftKey ? 24 : 10;
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        editorState.setSidebarWidth(editorState.sidebarWidth + step);
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        editorState.setSidebarWidth(editorState.sidebarWidth - step);
+      }
+    });
   }
 
   private createPanel(id: SidebarTab): HTMLElement {
@@ -142,6 +190,7 @@ export class SidebarTabsView {
     }
 
     this.element.style.display = "flex";
+    this.element.style.width = `${editorState.sidebarWidth}px`;
     const activeTab = editorState.activeSidebarTab;
     const annotations = editorState.doc.annotations ?? [];
 

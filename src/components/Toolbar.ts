@@ -3,6 +3,7 @@ import {
   Brush,
   Circle,
   Columns2,
+  Command,
   Download,
   Droplets,
   Eraser,
@@ -174,7 +175,7 @@ export class ToolbarView {
 
         <!-- Command Palette Trigger -->
         <button class="ui-button ui-button--tool" id="btn-cmd-palette" title="Command Palette (Ctrl+K)">
-          ${icon(Search)}
+          ${icon(Command)}
           <kbd class="palette-shortcut ms-1">Ctrl+K</kbd>
         </button>
 
