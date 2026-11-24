@@ -858,3 +858,34 @@ fn test_detect_crop_margins() {
         .unwrap();
     assert_eq!(box1, PageBox::new(0.0, 0.0, 612.0, 792.0));
 }
+
+#[test]
+fn test_pdf_point_to_viewport_roundtrip_all_rotations() {
+    let visible = PageBox::new(40.0, 70.0, 500.0, 600.0);
+    for (rotation, width, height) in [
+        (0, 500.0, 600.0),
+        (90, 600.0, 500.0),
+        (180, 500.0, 600.0),
+        (270, 600.0, 500.0),
+    ] {
+        let page = PageInfo {
+            index: 0,
+            rotation,
+            width,
+            height,
+            media_box: PageBox::new(10.0, 20.0, 612.0, 792.0),
+            crop_box: Some(visible),
+        };
+        let original = Point2D { x: 123.5, y: 245.25 };
+        let pdf_pt = page.viewport_point(original.x, original.y);
+        let roundtrip = page.pdf_point_to_viewport(pdf_pt);
+        assert!(
+            (roundtrip.x - original.x).abs() < 1e-9 && (roundtrip.y - original.y).abs() < 1e-9,
+            "rotation {rotation}: got ({}, {}) expected ({}, {})",
+            roundtrip.x,
+            roundtrip.y,
+            original.x,
+            original.y
+        );
+    }
+}
