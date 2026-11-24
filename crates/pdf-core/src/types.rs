@@ -87,6 +87,23 @@ impl PageInfo {
         }
     }
 
+    /// Converts a bottom-left PDF page point back into top-left viewport coordinates.
+    pub fn pdf_point_to_viewport(&self, point: Point2D) -> Point2D {
+        let visible = self
+            .crop_box
+            .and_then(|rect| rect.intersection(&self.media_box))
+            .unwrap_or(self.media_box);
+        let dx = point.x - visible.x;
+        let dy = point.y - visible.y;
+        let (x, y) = match self.rotation.rem_euclid(360) {
+            90 => (dy, dx),
+            180 => (visible.width - dx, dy),
+            270 => (visible.height - dy, visible.width - dx),
+            _ => (dx, visible.height - dy),
+        };
+        Point2D { x, y }
+    }
+
     pub fn pdf_rect_to_viewport(&self, rect: PageBox) -> PageBox {
         let visible = self
             .crop_box

@@ -113,6 +113,11 @@ impl AppState {
                     .map(|annotation| {
                         let mut annotation = annotation.clone();
                         annotation.rect = page.pdf_rect_to_viewport(annotation.rect);
+                        if let Some(points) = &mut annotation.points {
+                            for point in points.iter_mut().flatten() {
+                                *point = page.pdf_point_to_viewport(point.clone());
+                            }
+                        }
                         annotation
                     })
             })
