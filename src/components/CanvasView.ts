@@ -1,11 +1,26 @@
 import { showToolMenu } from "./EditorContextMenu";
-import { buildAnnotation, drawingBox, drawingStyle, requestAnnotationText, type DrawPoint } from "./drawing";
-import { resizeCrop } from "./cropGeometry";
+import { buildAnnotation, drawingBox, drawingStyle, requestAnnotationText, type AreaRedactItem, type DrawPoint } from "./drawing";
+import { computeFitZoom, formatUnitValue, resizeCrop } from "./cropGeometry";
+import { clearPendingPlacement, getPendingPlacement } from "./SignatureModal";
 import { PageRasterQueue } from "./ui/PageRasterQueue";
 import { Backend } from "../ipc/backend";
 import { editorState } from "../state/editorState";
-import { AnnotationDto, PageBox, PageInfo, SearchResult, ToolType } from "../types/editor";
+import { AnnotationDto, DocumentDto, PageBox, PageInfo, SearchResult, ToolType } from "../types/editor";
 import { toast } from "./Toast";
+
+type ExtendedBackend = typeof Backend & {
+  addImageAnnotation(pageIndex: number, rect: PageBox, imageBase64: string, opacity: number): Promise<DocumentDto>;
+};
+
+type ExtendedEditorState = typeof editorState & {
+  zoomFitMode?: "custom" | "fit-width" | "fit-page";
+  setZoom(zoom: number, keepFitMode?: boolean): void;
+  pendingRedactions?: AreaRedactItem[];
+  addPendingRedaction?(item: AreaRedactItem): void;
+};
+
+const backend = Backend as ExtendedBackend;
+const extState = editorState as ExtendedEditorState;
 
 export class CanvasViewportView {
   private element: HTMLElement;
@@ -38,6 +53,9 @@ export class CanvasViewportView {
   private gridOrigin = { x: 0, y: 0 };
   private gridZoomAnchor: { x: number; y: number } | null = null;
   private gridDrag: { pointer: number; x: number; y: number; moved: boolean; page?: number } | null = null;
+  private fitZoomFrame = 0;
+  private applyingFitZoom = false;
+  private resizeObserver: ResizeObserver | null = null;
 
   constructor(element: HTMLElement) {
     this.element = element;
@@ -77,6 +95,25 @@ export class CanvasViewportView {
         group.scrollIntoView({ behavior: "instant", block: "center", inline: "nearest" });
       }
     });
+
+    window.addEventListener("zoom-fit-width", () => this.applyFitZoom("fit-width"));
+    window.addEventListener("zoom-fit-page", () => this.applyFitZoom("fit-page"));
+    window.addEventListener("pending-placement-changed", () => {
+      if (!getPendingPlacement()) {
+        this.pagesContainer.querySelectorAll(".pending-placement-ghost").forEach((el) => el.remove());
+      }
+      this.syncInteractionCursors();
+    });
+
+    if (typeof ResizeObserver !== "undefined") {
+      this.resizeObserver = new ResizeObserver(() => {
+        const mode = extState.zoomFitMode;
+        if (editorState.doc && editorState.viewMode !== "grid" && (mode === "fit-width" || mode === "fit-page")) {
+          this.scheduleFitZoom(mode);
+        }
+      });
+      this.resizeObserver.observe(this.element);
+    }
   }
 
   private render() {
@@ -88,9 +125,25 @@ export class CanvasViewportView {
     }
     this.element.style.display = "flex";
     this.element.dataset.tool = editorState.activeTool;
+    if (editorState.activeTool !== "stamp" && getPendingPlacement()) {
+      clearPendingPlacement();
+    }
 
     const doc = editorState.doc;
     const mode = editorState.viewMode;
+    const fitMode = extState.zoomFitMode;
+    if (mode !== "grid" && (fitMode === "fit-width" || fitMode === "fit-page") && !this.applyingFitZoom) {
+      const targetZoom = this.computeCurrentFitZoom(fitMode);
+      if (targetZoom !== null && Math.abs(targetZoom - editorState.zoom) > 0.002) {
+        this.applyingFitZoom = true;
+        try {
+          extState.setZoom(targetZoom, true);
+        } finally {
+          this.applyingFitZoom = false;
+        }
+        return;
+      }
+    }
     const zoom = editorState.zoom;
 
     this.pagesContainer.className = `canvas-pages-container ${mode}`;
@@ -169,6 +222,9 @@ export class CanvasViewportView {
       }
       this.selectedAnnotation = selected;
     }
+
+    this.renderPendingRedactions();
+    this.syncInteractionCursors();
 
     const cropPage = editorState.activeTool === "crop" ? editorState.currentPage : null;
     const cropBox = editorState.cropBox;
@@ -413,9 +469,10 @@ export class CanvasViewportView {
     hud.style.top = `${hudTop}px`;
     hud.style.transform = "translateX(-50%)";
 
+    const unit = editorState.toolSettings.units;
     hud.innerHTML = `
       <div class="crop-hud-inner">
-        <span class="crop-hud-dims">${Math.round(box.width)} × ${Math.round(box.height)} pt</span>
+        <span class="crop-hud-dims">${formatUnitValue(box.width, unit)} × ${formatUnitValue(box.height, unit)} ${unit}</span>
         <span class="crop-hud-badge ${isLocked ? "locked" : ""}" id="crop-hud-ratio-tag">
           ${isLocked ? `Fixed ratio (${(box.width / Math.max(1, box.height)).toFixed(2)})` : "Free Ratio (Hold Ctrl to Lock)"}
         </span>
@@ -438,6 +495,33 @@ export class CanvasViewportView {
       if (e.key === "Control") {
         this.isCtrlHeld = true;
         this.updateCropHudBadges();
+      }
+
+      if (e.key === "Escape" && getPendingPlacement()) {
+        e.preventDefault();
+        clearPendingPlacement();
+        toast.show({ message: "Signature/stamp placement cancelled.", type: "info" });
+        return;
+      }
+
+      if ((e.key === "Delete" || e.key === "Backspace") &&
+          editorState.activeTool === "select" &&
+          editorState.selectedAnnotationId &&
+          !editorState.openingFile &&
+          !(e.target instanceof Element && e.target.closest("input, select, textarea, button, [contenteditable], dialog")) &&
+          !document.querySelector("#palette-modal")?.getBoundingClientRect().width) {
+        const annot = editorState.doc?.annotations?.find((a) => a.id === editorState.selectedAnnotationId);
+        if (annot) {
+          e.preventDefault();
+          if (annot.locked) {
+            toast.show({ message: "Unlock this annotation before deleting.", type: "warning" });
+          } else {
+            void Backend.deleteAnnotation(annot.page_index, annot.id)
+              .then((updated) => editorState.updateDocument(updated))
+              .catch((err) => toast.show({ message: String(err), type: "error" }));
+          }
+          return;
+        }
       }
 
       if (editorState.activeTool === "crop" && !editorState.openingFile &&
@@ -549,15 +633,45 @@ export class CanvasViewportView {
       const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(svg.getScreenCTM()!.inverse());
       return { x: Math.max(0, Math.min(page.width, point.x)), y: Math.max(0, Math.min(page.height, point.y)) };
     };
-    svg.addEventListener("pointerdown", (event) => {
+    svg.addEventListener("pointerdown", async (event) => {
       const tool = editorState.activeTool;
       if (!event.button && tool === "select" && editorState.viewMode !== "grid") {
         editorState.setCurrentPage(pageIndex);
         editorState.selectAnnotation(this.annotationAt(event, pageIndex)?.id ?? null);
         return;
       }
-      if (!event.button && tool === "trueRedact") {
-        document.getElementById("prop-redact-keyword")?.focus();
+      const placement = tool === "stamp" ? getPendingPlacement() : null;
+      if (!event.button && placement && editorState.viewMode !== "grid") {
+        event.preventDefault();
+        event.stopPropagation();
+        const page = editorState.doc?.pages[pageIndex];
+        if (!page) return;
+        const pt = pointAt(event);
+        const w = Math.min(page.width, placement.width);
+        const h = Math.min(page.height, placement.height);
+        const rect: PageBox = {
+          x: Math.max(0, Math.min(page.width - w, pt.x - w / 2)),
+          y: Math.max(0, Math.min(page.height - h, pt.y - h / 2)),
+          width: w,
+          height: h,
+        };
+        const documentVersion = editorState.documentVersion;
+        svg.querySelector(".pending-placement-ghost")?.remove();
+        clearPendingPlacement();
+        this.committingDraw = true;
+        try {
+          const updated = await backend.addImageAnnotation(pageIndex, rect, placement.imageBase64, placement.opacity);
+          if (editorState.documentVersion === documentVersion) {
+            editorState.updateDocument(updated);
+            editorState.setTool("select");
+            editorState.setCurrentPage(pageIndex);
+          }
+          toast.show({ message: `Placed ${placement.label} on page ${pageIndex + 1}.`, type: "success" });
+        } catch (error) {
+          toast.show({ message: `Could not place image: ${String(error)}`, type: "error" });
+        } finally {
+          this.committingDraw = false;
+        }
         return;
       }
       if (event.button || this.draw || this.committingDraw || ["select", "hand", "crop"].includes(tool)) return;
@@ -568,6 +682,11 @@ export class CanvasViewportView {
       this.draw = { pointer: event.pointerId, svg, tool, points: [pointAt(event)] };
     });
     svg.addEventListener("pointermove", (event) => {
+      const placement = editorState.activeTool === "stamp" ? getPendingPlacement() : null;
+      if (placement && !this.draw && editorState.viewMode !== "grid") {
+        this.renderPlacementGhost(svg, pageIndex, pointAt(event), placement.width, placement.height, placement.imageBase64, placement.opacity);
+        return;
+      }
       const draw = this.draw;
       if (!draw || draw.pointer !== event.pointerId || draw.svg !== svg) return;
       const point = pointAt(event);
@@ -575,6 +694,9 @@ export class CanvasViewportView {
       if ((draw.tool === "pen" || draw.tool === "highlighter") && !event.shiftKey) points.push(point);
       else points.splice(1, points.length, point);
       this.renderDrawPreview(svg, draw.tool, points);
+    });
+    svg.addEventListener("pointerleave", () => {
+      svg.querySelector(".pending-placement-ghost")?.remove();
     });
     svg.addEventListener("pointerup", async (event) => {
       const draw = this.draw;
@@ -594,6 +716,13 @@ export class CanvasViewportView {
       preview?.classList.replace("temp-draw-preview", "pending-draw-preview");
       try {
         const rect = drawingBox(points);
+        if (tool === "trueRedact") {
+          preview?.remove();
+          if (rect.width >= 3 && rect.height >= 3) {
+            extState.addPendingRedaction?.({ page_index: pageIndex, rect });
+          }
+          return;
+        }
         if (tool === "coverErase") {
           if (rect.width < 2 || rect.height < 2) { preview?.remove(); return; }
           const settings = editorState.toolSettings;
@@ -650,12 +779,23 @@ export class CanvasViewportView {
       preview.setAttribute("class", "temp-draw-preview");
       svg.appendChild(preview);
     }
-    const stroke = style.stroke;
-    const fill = ink || line ? "none" : tool === "coverErase" ? settings.coverColor
+    const stroke = tool === "trueRedact" ? "#dc2626" : style.stroke;
+    const fill = ink || line ? "none"
+      : tool === "trueRedact" ? "rgba(220, 38, 38, 0.18)"
+      : tool === "coverErase" ? settings.coverColor
       : tool === "highlight" ? style.stroke : settings.fillColor || "none";
     const attrs: Record<string, string | number> = {
-      stroke, fill, "stroke-width": style.width, opacity: style.opacity, "stroke-linecap": "round", "stroke-linejoin": "round",
+      stroke,
+      fill,
+      "stroke-width": tool === "trueRedact" ? 2 : style.width,
+      opacity: tool === "trueRedact" ? 1 : style.opacity,
+      "stroke-linecap": "round",
+      "stroke-linejoin": "round",
     };
+    if (tool === "trueRedact") {
+      attrs["stroke-dasharray"] = "6 3";
+      attrs["vector-effect"] = "non-scaling-stroke";
+    }
     if (ink) attrs.d = points.map(({ x, y }, i) => `${i === 0 ? "M" : "L"} ${x} ${y}`).join(" ");
     else if (tool === "arrow") {
       const angle = Math.atan2(last.y - first.y, last.x - first.x);
@@ -795,6 +935,147 @@ export class CanvasViewportView {
         const motion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
         target.scrollIntoView({ behavior: motion ? "instant" : "smooth", block: "center" });
       }
+    });
+  }
+
+  private renderPendingRedactions() {
+    const queue = extState.pendingRedactions ?? [];
+    for (const frame of this.pagesContainer.children) {
+      const pageEl = frame as HTMLElement;
+      const pageIndex = Number(pageEl.dataset.pageIndex);
+      const svg = pageEl.querySelector("svg");
+      if (!svg) continue;
+      svg.querySelector(".pending-redactions-layer")?.remove();
+      const items = queue.map((item, index) => ({ item, index })).filter(({ item }) => item.page_index === pageIndex);
+      if (!items.length) continue;
+
+      const group = document.createElementNS(svg.namespaceURI, "g");
+      group.setAttribute("class", "pending-redactions-layer");
+      group.setAttribute("pointer-events", "none");
+      for (const { item, index } of items) {
+        const rect = document.createElementNS(svg.namespaceURI, "rect");
+        rect.setAttribute("x", String(item.rect.x));
+        rect.setAttribute("y", String(item.rect.y));
+        rect.setAttribute("width", String(item.rect.width));
+        rect.setAttribute("height", String(item.rect.height));
+        rect.setAttribute("fill", "rgba(220, 38, 38, 0.18)");
+        rect.setAttribute("stroke", "#dc2626");
+        rect.setAttribute("stroke-width", "2");
+        rect.setAttribute("stroke-dasharray", "6 3");
+        rect.setAttribute("vector-effect", "non-scaling-stroke");
+        group.appendChild(rect);
+
+        const label = document.createElementNS(svg.namespaceURI, "text");
+        label.setAttribute("x", String(item.rect.x + 4));
+        label.setAttribute("y", String(item.rect.y + 12));
+        label.setAttribute("fill", "#dc2626");
+        label.setAttribute("font-size", "10");
+        label.setAttribute("font-weight", "700");
+        label.textContent = `#${index + 1}`;
+        group.appendChild(label);
+      }
+      svg.appendChild(group);
+    }
+  }
+
+  private syncInteractionCursors() {
+    const tool = editorState.activeTool;
+    const isCrosshair = tool === "trueRedact" || (tool === "stamp" && Boolean(getPendingPlacement()));
+    for (const svg of this.pagesContainer.querySelectorAll<SVGSVGElement>(".pdf-annotation-layer")) {
+      svg.style.cursor = isCrosshair ? "crosshair" : "";
+      svg.style.touchAction = isCrosshair ? "none" : "";
+    }
+  }
+
+  private renderPlacementGhost(
+    svg: SVGSVGElement,
+    pageIndex: number,
+    pt: DrawPoint,
+    width: number,
+    height: number,
+    imageBase64: string,
+    opacity: number,
+  ) {
+    const page = editorState.doc?.pages[pageIndex];
+    if (!page) return;
+    const w = Math.min(page.width, width);
+    const h = Math.min(page.height, height);
+    const x = Math.max(0, Math.min(page.width - w, pt.x - w / 2));
+    const y = Math.max(0, Math.min(page.height - h, pt.y - h / 2));
+
+    let ghost = svg.querySelector(".pending-placement-ghost");
+    if (!ghost) {
+      const ns = "http://www.w3.org/2000/svg";
+      ghost = document.createElementNS(ns, "g");
+      ghost.setAttribute("class", "pending-placement-ghost");
+      ghost.setAttribute("pointer-events", "none");
+      const img = document.createElementNS(ns, "image");
+      const outline = document.createElementNS(ns, "rect");
+      outline.setAttribute("fill", "none");
+      outline.setAttribute("stroke", "var(--ring)");
+      outline.setAttribute("stroke-width", "1.5");
+      outline.setAttribute("stroke-dasharray", "4 3");
+      outline.setAttribute("vector-effect", "non-scaling-stroke");
+      ghost.append(img, outline);
+      svg.appendChild(ghost);
+    }
+    const img = ghost.querySelector("image")!;
+    const outline = ghost.querySelector("rect")!;
+    if (img.getAttribute("href") !== imageBase64) img.setAttribute("href", imageBase64);
+    img.setAttribute("x", String(x));
+    img.setAttribute("y", String(y));
+    img.setAttribute("width", String(w));
+    img.setAttribute("height", String(h));
+    img.setAttribute("opacity", String(Math.max(0.25, opacity * 0.85)));
+    outline.setAttribute("x", String(x));
+    outline.setAttribute("y", String(y));
+    outline.setAttribute("width", String(w));
+    outline.setAttribute("height", String(h));
+  }
+
+  private computeCurrentFitZoom(fitMode: "fit-width" | "fit-page"): number | null {
+    const doc = editorState.doc;
+    if (!doc || this.element.clientWidth <= 0 || this.element.clientHeight <= 0) return null;
+    const cs = getComputedStyle(this.element);
+    const padX = (parseFloat(cs.paddingLeft) || 24) + (parseFloat(cs.paddingRight) || 24);
+    const padY = (parseFloat(cs.paddingTop) || 24) + (parseFloat(cs.paddingBottom) || 24);
+
+    let contentW = doc.pages[editorState.currentPage]?.width ?? 612;
+    let contentH = doc.pages[editorState.currentPage]?.height ?? 792;
+    let extraGapX = 0;
+
+    if (editorState.viewMode === "spread") {
+      const p = editorState.currentPage;
+      const spreadPages = (p % 2 === 0 ? [p, p + 1] : [p - 1, p]).filter((idx) => idx >= 0 && idx < doc.page_count);
+      if (spreadPages.length === 2) {
+        contentW = doc.pages[spreadPages[0]].width + doc.pages[spreadPages[1]].width;
+        contentH = Math.max(doc.pages[spreadPages[0]].height, doc.pages[spreadPages[1]].height);
+        extraGapX = 24;
+      }
+    }
+
+    return computeFitZoom(this.element.clientWidth, this.element.clientHeight, contentW, contentH, fitMode, padX + extraGapX, padY);
+  }
+
+  private applyFitZoom(fitMode: "fit-width" | "fit-page") {
+    if (!editorState.doc || editorState.viewMode === "grid") return;
+    const nextZoom = this.computeCurrentFitZoom(fitMode);
+    if (nextZoom === null) return;
+    if (Math.abs(nextZoom - editorState.zoom) > 0.002) {
+      this.applyingFitZoom = true;
+      try {
+        extState.setZoom(nextZoom, true);
+      } finally {
+        this.applyingFitZoom = false;
+      }
+    }
+  }
+
+  private scheduleFitZoom(fitMode: "fit-width" | "fit-page") {
+    if (this.fitZoomFrame) cancelAnimationFrame(this.fitZoomFrame);
+    this.fitZoomFrame = requestAnimationFrame(() => {
+      this.fitZoomFrame = 0;
+      this.applyFitZoom(fitMode);
     });
   }
 }

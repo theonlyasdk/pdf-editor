@@ -45,3 +45,58 @@ export function resizeCrop(
     height,
   };
 }
+
+export type MeasurementUnit = "pt" | "mm" | "in";
+
+const PT_PER_INCH = 72;
+const MM_PER_INCH = 25.4;
+
+/** Convert PDF points to the requested display unit. */
+export function ptToUnit(pt: number, unit: MeasurementUnit): number {
+  if (unit === "mm") return (pt * MM_PER_INCH) / PT_PER_INCH;
+  if (unit === "in") return pt / PT_PER_INCH;
+  return pt;
+}
+
+/** Convert a value in the given unit back to PDF points. */
+export function unitToPt(value: number, unit: MeasurementUnit): number {
+  if (unit === "mm") return (value * PT_PER_INCH) / MM_PER_INCH;
+  if (unit === "in") return value * PT_PER_INCH;
+  return value;
+}
+
+export function unitStep(unit: MeasurementUnit): string {
+  if (unit === "mm") return "0.1";
+  if (unit === "in") return "0.01";
+  return "1";
+}
+
+export function formatUnitValue(pt: number, unit: MeasurementUnit): string {
+  const val = ptToUnit(pt, unit);
+  if (unit === "mm") return val.toFixed(1);
+  if (unit === "in") return val.toFixed(2);
+  return String(Math.round(val));
+}
+
+export function formatMeasurement(pt: number, unit: MeasurementUnit): string {
+  return `${formatUnitValue(pt, unit)} ${unit}`;
+}
+
+/** Compute clamped zoom level for fit-width or fit-page within viewport bounds. */
+export function computeFitZoom(
+  viewportWidth: number,
+  viewportHeight: number,
+  contentWidth: number,
+  contentHeight: number,
+  mode: "fit-width" | "fit-page",
+  paddingX = 48,
+  paddingY = 48,
+): number {
+  const availW = Math.max(80, viewportWidth - paddingX - 4);
+  const availH = Math.max(80, viewportHeight - paddingY - 4);
+  const widthZoom = availW / Math.max(1, contentWidth);
+  const heightZoom = availH / Math.max(1, contentHeight);
+  const raw = mode === "fit-width" ? widthZoom : Math.min(widthZoom, heightZoom);
+  const clamped = Math.min(8.0, Math.max(0.1, raw));
+  return Math.round(clamped * 10000) / 10000;
+}
