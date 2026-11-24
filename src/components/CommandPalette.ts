@@ -1,8 +1,7 @@
 import { STRINGS } from "../i18n/strings";
 import { Backend } from "../ipc/backend";
 import { editorState } from "../state/editorState";
-import { ToolType, ViewMode } from "../types/editor";
-import { toast } from "./Toast";
+import { guardedCloseDocument, guardedNewDocument, guardedPickPdf } from "./UnsavedGuard";
 
 interface PaletteCommand {
   id: string;
@@ -35,7 +34,7 @@ export class CommandPaletteView {
         label: "Open PDF Document...",
         shortcut: "Ctrl+O",
         action: () => {
-          document.getElementById("btn-open")?.click();
+          void guardedPickPdf();
         },
       },
       {
@@ -60,9 +59,40 @@ export class CommandPaletteView {
         id: "new-blank",
         category: "File",
         label: "Create New Blank PDF",
-        action: async () => {
-          const doc = await Backend.newDocument();
-          editorState.setDocument(doc);
+        action: () => {
+          void guardedNewDocument();
+        },
+      },
+      {
+        id: "close-document",
+        category: "File",
+        label: "Close Document",
+        action: () => {
+          void guardedCloseDocument();
+        },
+      },
+      {
+        id: "metadata",
+        category: "File",
+        label: "Document Properties & Metadata...",
+        action: () => {
+          if (isDoc) window.dispatchEvent(new CustomEvent("open-metadata"));
+        },
+      },
+      {
+        id: "merge-split",
+        category: "File",
+        label: "Merge / Split / Extract Pages...",
+        action: () => {
+          if (isDoc) window.dispatchEvent(new CustomEvent("open-merge-split"));
+        },
+      },
+      {
+        id: "export-print",
+        category: "File",
+        label: "Export Pages as Images / Print...",
+        action: () => {
+          if (isDoc) window.dispatchEvent(new CustomEvent("open-export-print"));
         },
       },
 
@@ -89,6 +119,12 @@ export class CommandPaletteView {
         action: () => editorState.setTool("freeText"),
       },
       {
+        id: "tool-sticky-note",
+        category: "Tool",
+        label: "Sticky Note Tool",
+        action: () => editorState.setTool("stickyNote"),
+      },
+      {
         id: "tool-pen",
         category: "Tool",
         label: "Freehand Pen Tool",
@@ -101,6 +137,18 @@ export class CommandPaletteView {
         label: "Text Highlight Tool",
         shortcut: "Shift+H",
         action: () => editorState.setTool("highlight"),
+      },
+      {
+        id: "tool-underline",
+        category: "Tool",
+        label: "Underline Tool",
+        action: () => editorState.setTool("underline"),
+      },
+      {
+        id: "tool-strikeout",
+        category: "Tool",
+        label: "Strikethrough Tool",
+        action: () => editorState.setTool("strikeout"),
       },
       {
         id: "tool-rect",
@@ -119,6 +167,20 @@ export class CommandPaletteView {
         category: "Tool",
         label: "Draw Arrow",
         action: () => editorState.setTool("arrow"),
+      },
+      {
+        id: "tool-stamp",
+        category: "Tool",
+        label: "Stamp Tool",
+        action: () => editorState.setTool("stamp"),
+      },
+      {
+        id: "open-signature",
+        category: "Tool",
+        label: "Signature & Custom Stamp...",
+        action: () => {
+          if (isDoc) window.dispatchEvent(new CustomEvent("open-signature"));
+        },
       },
       {
         id: "tool-crop",
@@ -140,7 +202,7 @@ export class CommandPaletteView {
         action: () => editorState.setTool("coverErase"),
       },
 
-      // View
+      // View & Navigation
       {
         id: "view-continuous",
         category: "View",
@@ -166,11 +228,34 @@ export class CommandPaletteView {
         action: () => editorState.setViewMode("grid"),
       },
       {
+        id: "go-to-page",
+        category: "View",
+        label: "Go to Page...",
+        shortcut: "Ctrl+G",
+        action: () => {
+          if (isDoc) window.dispatchEvent(new CustomEvent("open-page-jump"));
+        },
+      },
+      {
         id: "find-text",
         label: "Find in document",
         category: "View",
         shortcut: "Ctrl+F",
-        action: () => { window.dispatchEvent(new Event("open-document-search")); },
+        action: () => {
+          window.dispatchEvent(new Event("open-document-search"));
+        },
+      },
+      {
+        id: "zoom-fit-width",
+        category: "View",
+        label: "Zoom: Fit Width",
+        action: () => editorState.requestFitWidth(),
+      },
+      {
+        id: "zoom-fit-page",
+        category: "View",
+        label: "Zoom: Fit Page",
+        action: () => editorState.requestFitPage(),
       },
       {
         id: "zoom-in",
@@ -192,6 +277,24 @@ export class CommandPaletteView {
         label: "Zoom to 100% Actual Size",
         shortcut: "Ctrl+0",
         action: () => editorState.setZoom(1.0),
+      },
+      {
+        id: "sidebar-thumbnails",
+        category: "View",
+        label: "Sidebar: Page Thumbnails",
+        action: () => editorState.setSidebarTab("thumbnails"),
+      },
+      {
+        id: "sidebar-outline",
+        category: "View",
+        label: "Sidebar: Outline & Bookmarks",
+        action: () => editorState.setSidebarTab("outline"),
+      },
+      {
+        id: "sidebar-annotations",
+        category: "View",
+        label: "Sidebar: Annotations List",
+        action: () => editorState.setSidebarTab("annotations"),
       },
       {
         id: "toggle-theme",
@@ -227,11 +330,17 @@ export class CommandPaletteView {
       {
         id: "page-insert-blank",
         category: "Page",
-        label: "Insert Blank Page After Current",
-        action: async () => {
-          if (!isDoc) return;
-          const doc = await Backend.insertBlankPage(editorState.currentPage + 1, 612.0, 792.0);
-          editorState.updateDocument(doc);
+        label: "Insert Blank Page...",
+        action: () => {
+          if (isDoc) window.dispatchEvent(new CustomEvent("open-insert-page"));
+        },
+      },
+      {
+        id: "page-watermark",
+        category: "Page",
+        label: "Watermarks, Headers & Page Numbers...",
+        action: () => {
+          if (isDoc) window.dispatchEvent(new CustomEvent("open-watermark"));
         },
       },
       {
@@ -260,6 +369,26 @@ export class CommandPaletteView {
         label: "Redo Action",
         shortcut: "Ctrl+Y",
         action: () => editorState.redo(),
+      },
+
+      // Preferences & Help
+      {
+        id: "open-preferences",
+        category: "Workspace",
+        label: "Preferences...",
+        shortcut: "Ctrl+,",
+        action: () => {
+          window.dispatchEvent(new CustomEvent("open-preferences"));
+        },
+      },
+      {
+        id: "open-shortcuts",
+        category: "Workspace",
+        label: "Keyboard Shortcuts",
+        shortcut: "?",
+        action: () => {
+          window.dispatchEvent(new CustomEvent("open-shortcuts"));
+        },
       },
     ];
   }
@@ -305,6 +434,10 @@ export class CommandPaletteView {
     this.backdrop.style.display = "none";
   }
 
+  private isPaletteOpen(): boolean {
+    return Boolean(this.backdrop && this.backdrop.style.display !== "none");
+  }
+
   private filterCommands() {
     const query = this.input?.value.trim().toLowerCase() || "";
     const all = this.getCommands();
@@ -344,7 +477,7 @@ export class CommandPaletteView {
 
       item.addEventListener("click", () => {
         this.close();
-        cmd.action();
+        void cmd.action();
       });
 
       this.resultsContainer?.appendChild(item);
@@ -371,7 +504,7 @@ export class CommandPaletteView {
       if (this.currentMatches.length > 0 && this.currentMatches[this.selectedIndex]) {
         const cmd = this.currentMatches[this.selectedIndex];
         this.close();
-        cmd.action();
+        void cmd.action();
       }
     }
   }
@@ -379,20 +512,42 @@ export class CommandPaletteView {
   private bindGlobalKeyboard() {
     window.addEventListener("keydown", (e) => {
       if (editorState.openingFile) return;
+
+      const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+
+      if (this.isPaletteOpen() && e.key === "Escape") {
+        e.preventDefault();
+        this.close();
+        return;
+      }
+
+      // Ctrl+, / Cmd+, -> Preferences
+      if (mod && e.key === ",") {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent("open-preferences"));
+        return;
+      }
+      // Ctrl+/ or Cmd+/ -> Shortcuts
+      if (mod && e.key === "/") {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent("open-shortcuts"));
+        return;
+      }
       // Ctrl+K or Cmd+K
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      if (mod && key === "k") {
         e.preventDefault();
         this.open();
         return;
       }
       // Ctrl+O
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
+      if (mod && key === "o") {
         e.preventDefault();
-        document.getElementById("btn-open")?.click();
+        void guardedPickPdf();
         return;
       }
       // Ctrl+S
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      if (mod && key === "s") {
         e.preventDefault();
         if (e.shiftKey) {
           document.getElementById("btn-save-as")?.click();
@@ -401,29 +556,74 @@ export class CommandPaletteView {
         }
         return;
       }
-      // Ctrl+Z
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
-        if (!e.shiftKey) {
-          e.preventDefault();
-          editorState.undo();
-        }
+      // Ctrl+G -> Go to page
+      if (mod && key === "g" && editorState.doc) {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent("open-page-jump"));
+        return;
+      }
+      // Ctrl+T -> Toggle theme
+      if (mod && key === "t") {
+        e.preventDefault();
+        editorState.toggleTheme();
+        return;
+      }
+      // Ctrl+Z / Ctrl+Shift+Z
+      if (mod && key === "z") {
+        e.preventDefault();
+        if (e.shiftKey) void editorState.redo();
+        else void editorState.undo();
         return;
       }
       // Ctrl+Y
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
+      if (mod && key === "y") {
         e.preventDefault();
-        editorState.redo();
+        void editorState.redo();
         return;
       }
-      // Tool shortcuts (V, H, T, P, C) when not inside an input
-      const targetTag = (e.target as HTMLElement).tagName.toLowerCase();
-      if (targetTag !== "input" && targetTag !== "textarea") {
-        if (e.key.toLowerCase() === "v") editorState.setTool("select");
-        if (e.key.toLowerCase() === "h") editorState.setTool("hand");
-        if (e.key.toLowerCase() === "t") editorState.setTool("freeText");
-        if (e.key.toLowerCase() === "p") editorState.setTool("pen");
-        if (e.key.toLowerCase() === "c") editorState.setTool("crop");
+      // Zoom shortcuts: Ctrl+= / Ctrl++ / Ctrl+- / Ctrl+0
+      if (mod && (e.key === "=" || e.key === "+")) {
+        e.preventDefault();
+        editorState.zoomIn();
+        return;
       }
+      if (mod && e.key === "-") {
+        e.preventDefault();
+        editorState.zoomOut();
+        return;
+      }
+      if (mod && e.key === "0") {
+        e.preventDefault();
+        editorState.setZoom(1.0);
+        return;
+      }
+
+      // Single-key shortcuts when not typing in an input or inside an open dialog/palette
+      const target = e.target as HTMLElement | null;
+      const targetTag = target?.tagName?.toLowerCase() ?? "";
+      if (
+        mod ||
+        e.altKey ||
+        this.isPaletteOpen() ||
+        document.querySelector("dialog[open]") ||
+        targetTag === "input" ||
+        targetTag === "textarea" ||
+        targetTag === "select" ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+
+      if (e.key === "?") {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent("open-shortcuts"));
+        return;
+      }
+      if (key === "v") editorState.setTool("select");
+      else if (key === "h") editorState.setTool(e.shiftKey ? "highlight" : "hand");
+      else if (key === "t") editorState.setTool("freeText");
+      else if (key === "p") editorState.setTool("pen");
+      else if (key === "c") editorState.setTool("crop");
     });
   }
 }

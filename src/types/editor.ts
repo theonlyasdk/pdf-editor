@@ -65,6 +65,59 @@ export interface AnnotationDto {
   author?: string | null;
   modified_date?: string | null;
   locked: boolean;
+  image_base64?: string | null;
+}
+
+export interface DocumentMetadataUpdate {
+  title?: string | null;
+  author?: string | null;
+  subject?: string | null;
+  keywords?: string | null;
+  creator?: string | null;
+  producer?: string | null;
+}
+
+export interface AreaRedactItem {
+  page_index: number;
+  rect: PageBox;
+}
+
+export type OverlayKind = "watermark" | "page_numbers" | "header_footer" | "bates";
+
+export type OverlayPosition =
+  | "center"
+  | "top_left"
+  | "top_center"
+  | "top_right"
+  | "bottom_left"
+  | "bottom_center"
+  | "bottom_right";
+
+export interface BatchOverlayOptions {
+  kind: OverlayKind;
+  pages?: number[] | null;
+  text?: string | null;
+  position?: OverlayPosition | null;
+  font_size?: number | null;
+  color?: string | null;
+  opacity?: number | null;
+  rotation?: number | null;
+  margin?: number | null;
+  bates_prefix?: string | null;
+  bates_start?: number | null;
+  bates_digits?: number | null;
+  header_left?: string | null;
+  header_center?: string | null;
+  header_right?: string | null;
+  footer_left?: string | null;
+  footer_center?: string | null;
+  footer_right?: string | null;
+}
+
+export interface OutlineItem {
+  title: string;
+  page_index: number | null;
+  children: OutlineItem[];
 }
 
 export interface DocumentDto {
@@ -88,6 +141,21 @@ export interface SearchResult {
 }
 
 export type CropRatioMode = "free" | "original" | "1:1" | "4:3" | "16:9";
+export type MeasurementUnit = "pt" | "mm" | "in";
+export type ThemeMode = "system" | "light" | "dark";
+export type DefaultZoomMode = "100%" | "fit-width" | "fit-page";
+export type ZoomFitMode = "custom" | "fit-width" | "fit-page";
+export type SidebarTab = "thumbnails" | "outline" | "annotations";
+
+export interface EditorPreferences {
+  themeMode: ThemeMode;
+  defaultViewMode: ViewMode;
+  defaultZoom: DefaultZoomMode;
+  units: MeasurementUnit;
+  author: string;
+  makeBackup: boolean;
+  autosaveIntervalSec: number;
+}
 
 export interface ToolSettings {
   strokeColor: string;
@@ -99,6 +167,6 @@ export interface ToolSettings {
   author: string;
   stampText: string;
   coverColor: string;
-  units: "pt" | "mm" | "in";
+  units: MeasurementUnit;
   cropRatioMode: CropRatioMode;
 }
