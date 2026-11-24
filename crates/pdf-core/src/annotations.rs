@@ -1,7 +1,26 @@
 use crate::document::{CoreError, DocumentState};
 use crate::types::{AnnotationDto, AnnotationType, PageBox};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use image::GenericImageView;
 use lopdf::content::{Content, Operation};
-use lopdf::{dictionary, Object, Stream};
+use lopdf::{dictionary, Object, ObjectId, Stream};
+
+/// Decodes a base64 image string (supporting optional `data:image/...;base64,` prefix).
+pub fn decode_image_base64(raw: &str) -> Result<Vec<u8>, CoreError> {
+    let trimmed = raw.trim();
+    let payload = if let Some(idx) = trimmed.find(";base64,") {
+        &trimmed[idx + 8..]
+    } else if let Some(idx) = trimmed.find("base64,") {
+        &trimmed[idx + 7..]
+    } else {
+        trimmed
+    };
+    let compact: String = payload.chars().filter(|c| !c.is_whitespace()).collect();
+    BASE64
+        .decode(compact.as_bytes())
+        .map_err(|e| CoreError::ValidationFailed(format!("Invalid base64 image data: {}", e)))
+}
 
 /// Applies in-memory annotations to the physical PDF document as standard PDF annotations.
 pub fn commit_annotations_to_pdf(doc_state: &mut DocumentState) -> Result<(), CoreError> {
@@ -68,16 +87,17 @@ fn create_pdf_annotation(
         AnnotationType::Ink => "Ink",
         AnnotationType::FreeText => "FreeText",
         AnnotationType::StickyNote => "Text",
-        AnnotationType::Stamp => "Stamp",
-        AnnotationType::Image => "Square",
+        AnnotationType::Stamp | AnnotationType::Image => "Stamp",
     };
+
+    let flags = if annot.locked { 4 | 128 } else { 4 };
 
     let mut dict = dictionary! {
         "Type" => "Annot",
         "Subtype" => subtype_str,
         "Rect" => rect_arr,
         "NM" => Object::string_literal(annot.id.as_str()),
-        "F" => 4,
+        "F" => flags,
         "C" => vec![r.into(), g.into(), b.into()],
         "CA" => Object::Real(annot.opacity as f32),
         "ca" => Object::Real(annot.opacity as f32),
@@ -88,6 +108,9 @@ fn create_pdf_annotation(
     }
     if let Some(ref author) = annot.author {
         dict.set("T", Object::string_literal(author.as_str()));
+    }
+    if let Some(ref modified) = annot.modified_date {
+        dict.set("M", Object::string_literal(modified.as_str()));
     }
 
     let points = |line: &[crate::types::Point2D]| {
@@ -149,6 +172,13 @@ fn create_pdf_annotation(
             dict.set("Name", Object::Name(b"Note".to_vec()));
             return Ok(doc.add_object(dict));
         }
+        AnnotationType::Image => {
+            if let Some(ref b64) = annot.image_base64 {
+                let ap_stream_id = create_image_appearance_stream(doc, annot, b64)?;
+                dict.set("AP", dictionary! { "N" => Object::Reference(ap_stream_id) });
+                return Ok(doc.add_object(dict));
+            }
+        }
         _ => {}
     }
 
@@ -171,6 +201,94 @@ fn create_pdf_annotation(
 
     let annot_id = doc.add_object(dict);
     Ok(annot_id)
+}
+
+fn create_image_appearance_stream(
+    doc: &mut lopdf::Document,
+    annot: &AnnotationDto,
+    image_b64: &str,
+) -> Result<ObjectId, CoreError> {
+    let raw = decode_image_base64(image_b64)?;
+    let dyn_img = image::load_from_memory(&raw)
+        .map_err(|e| CoreError::ValidationFailed(format!("Failed to decode image: {}", e)))?;
+    let (img_w, img_h) = dyn_img.dimensions();
+    let rgba = dyn_img.to_rgba8();
+
+    let mut rgb_bytes = Vec::with_capacity((img_w * img_h * 3) as usize);
+    let mut alpha_bytes = Vec::with_capacity((img_w * img_h) as usize);
+    let mut has_transparency = false;
+
+    for px in rgba.pixels() {
+        rgb_bytes.push(px[0]);
+        rgb_bytes.push(px[1]);
+        rgb_bytes.push(px[2]);
+        alpha_bytes.push(px[3]);
+        if px[3] < 255 {
+            has_transparency = true;
+        }
+    }
+
+    let mut image_dict = dictionary! {
+        "Type" => "XObject",
+        "Subtype" => "Image",
+        "Width" => img_w as i64,
+        "Height" => img_h as i64,
+        "ColorSpace" => "DeviceRGB",
+        "BitsPerComponent" => 8,
+    };
+
+    if has_transparency {
+        let mut smask_stream = Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => img_w as i64,
+                "Height" => img_h as i64,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8,
+            },
+            alpha_bytes,
+        );
+        let _ = smask_stream.compress();
+        let smask_id = doc.add_object(smask_stream);
+        image_dict.set("SMask", Object::Reference(smask_id));
+    }
+
+    let mut image_stream = Stream::new(image_dict, rgb_bytes);
+    let _ = image_stream.compress();
+    let image_id = doc.add_object(image_stream);
+
+    let w = annot.rect.width.max(1.0);
+    let h = annot.rect.height.max(1.0);
+    let ops = vec![
+        Operation::new("q", vec![]),
+        Operation::new("gs", vec!["Opacity".into()]),
+        Operation::new(
+            "cm",
+            vec![w.into(), 0.into(), 0.into(), h.into(), 0.into(), 0.into()],
+        ),
+        Operation::new("Do", vec!["Im0".into()]),
+        Operation::new("Q", vec![]),
+    ];
+    let ap_bytes = Content { operations: ops }.encode().unwrap_or_default();
+
+    let ap_stream_id = doc.add_object(Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), w.into(), h.into()],
+            "Resources" => dictionary! {
+                "XObject" => dictionary! { "Im0" => Object::Reference(image_id) },
+                "ExtGState" => dictionary! { "Opacity" => dictionary! {
+                    "Type" => "ExtGState",
+                    "CA" => Object::Real(annot.opacity as f32),
+                    "ca" => Object::Real(annot.opacity as f32),
+                }}
+            },
+        },
+        ap_bytes,
+    ));
+    Ok(ap_stream_id)
 }
 
 fn generate_appearance_stream(annot: &AnnotationDto, r: f64, g: f64, b: f64) -> Vec<u8> {

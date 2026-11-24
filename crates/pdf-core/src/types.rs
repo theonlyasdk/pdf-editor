@@ -195,6 +195,91 @@ pub struct AnnotationDto {
     pub author: Option<String>,
     pub modified_date: Option<String>,
     pub locked: bool,
+    #[serde(default)]
+    pub image_base64: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DocumentMetadataUpdate {
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub subject: Option<String>,
+    pub keywords: Option<String>,
+    pub creator: Option<String>,
+    pub producer: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AreaRedactItem {
+    pub page_index: usize,
+    pub rect: PageBox,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayKind {
+    Watermark,
+    PageNumbers,
+    HeaderFooter,
+    Bates,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayPosition {
+    Center,
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchOverlayOptions {
+    pub kind: OverlayKind,
+    #[serde(default)]
+    pub pages: Option<Vec<usize>>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub position: Option<OverlayPosition>,
+    #[serde(default)]
+    pub font_size: Option<f64>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub opacity: Option<f64>,
+    #[serde(default)]
+    pub rotation: Option<f64>,
+    #[serde(default)]
+    pub margin: Option<f64>,
+    #[serde(default)]
+    pub bates_prefix: Option<String>,
+    #[serde(default)]
+    pub bates_start: Option<u64>,
+    #[serde(default)]
+    pub bates_digits: Option<usize>,
+    #[serde(default)]
+    pub header_left: Option<String>,
+    #[serde(default)]
+    pub header_center: Option<String>,
+    #[serde(default)]
+    pub header_right: Option<String>,
+    #[serde(default)]
+    pub footer_left: Option<String>,
+    #[serde(default)]
+    pub footer_center: Option<String>,
+    #[serde(default)]
+    pub footer_right: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OutlineItem {
+    pub title: String,
+    pub page_index: Option<usize>,
+    pub children: Vec<OutlineItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -83,6 +83,7 @@ fn test_end_to_end_full_user_workflow() {
         author: Some("Lead Editor".into()),
         modified_date: None,
         locked: false,
+        image_base64: None,
     };
     cmd_mgr
         .execute(
@@ -111,6 +112,7 @@ fn test_end_to_end_full_user_workflow() {
         author: Some("Lead Editor".into()),
         modified_date: None,
         locked: false,
+        image_base64: None,
     };
     cmd_mgr
         .execute(

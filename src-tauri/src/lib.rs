@@ -32,6 +32,17 @@ pub fn run() {
             commands::evaluate_range,
             commands::search_document,
             commands::get_document_state,
+            commands::update_annotation,
+            commands::update_metadata,
+            commands::strip_metadata,
+            commands::merge_pdf,
+            commands::extract_pages,
+            commands::export_pages_as_images,
+            commands::apply_area_redactions,
+            commands::add_image_annotation,
+            commands::apply_watermark_or_page_numbers,
+            commands::get_document_outline,
+            commands::detect_crop_margins,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

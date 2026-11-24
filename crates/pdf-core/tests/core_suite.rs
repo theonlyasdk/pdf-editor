@@ -227,6 +227,7 @@ fn test_pdfium_rendering_and_roundtrip() {
         author: Some("Tester".to_string()),
         modified_date: None,
         locked: false,
+        image_base64: None,
     };
     doc.annotations.entry(0).or_default().push(annot);
 

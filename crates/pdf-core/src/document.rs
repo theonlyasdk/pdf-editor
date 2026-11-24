@@ -1,6 +1,7 @@
+use crate::outline::decode_pdf_string;
 use crate::types::*;
-use lopdf::{dictionary, Document, Object, ObjectId};
-use std::collections::HashMap;
+use lopdf::{dictionary, Dictionary, Document, Object, ObjectId};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -169,46 +170,208 @@ impl DocumentState {
         if let Ok(info_ref) = self.doc.trailer.get(b"Info") {
             if let Ok(info_id) = info_ref.as_reference() {
                 if let Ok(info_dict) = self.doc.get_dictionary(info_id) {
-                    if let Ok(t) = info_dict.get(b"Title") {
-                        meta.title = t
-                            .as_str()
-                            .map(|s| String::from_utf8_lossy(s).into_owned())
-                            .ok();
-                    }
-                    if let Ok(a) = info_dict.get(b"Author") {
-                        meta.author = a
-                            .as_str()
-                            .map(|s| String::from_utf8_lossy(s).into_owned())
-                            .ok();
-                    }
-                    if let Ok(s) = info_dict.get(b"Subject") {
-                        meta.subject = s
-                            .as_str()
-                            .map(|s| String::from_utf8_lossy(s).into_owned())
-                            .ok();
-                    }
-                    if let Ok(k) = info_dict.get(b"Keywords") {
-                        meta.keywords = k
-                            .as_str()
-                            .map(|s| String::from_utf8_lossy(s).into_owned())
-                            .ok();
-                    }
-                    if let Ok(c) = info_dict.get(b"Creator") {
-                        meta.creator = c
-                            .as_str()
-                            .map(|s| String::from_utf8_lossy(s).into_owned())
-                            .ok();
-                    }
-                    if let Ok(p) = info_dict.get(b"Producer") {
-                        meta.producer = p
-                            .as_str()
-                            .map(|s| String::from_utf8_lossy(s).into_owned())
-                            .ok();
-                    }
+                    let read_str = |key: &[u8]| -> Option<String> {
+                        info_dict.get(key).ok().and_then(|obj| match obj {
+                            Object::String(bytes, _) => Some(decode_pdf_string(bytes)),
+                            _ => obj.as_str().ok().map(decode_pdf_string),
+                        })
+                    };
+                    meta.title = read_str(b"Title");
+                    meta.author = read_str(b"Author");
+                    meta.subject = read_str(b"Subject");
+                    meta.keywords = read_str(b"Keywords");
+                    meta.creator = read_str(b"Creator");
+                    meta.producer = read_str(b"Producer");
                 }
             }
         }
         meta
+    }
+
+    /// Updates document /Info metadata fields. None or empty string clears the field.
+    pub fn update_metadata(&mut self, update: &DocumentMetadataUpdate) -> Result<(), CoreError> {
+        let info_id = match self
+            .doc
+            .trailer
+            .get(b"Info")
+            .ok()
+            .and_then(|o| o.as_reference().ok())
+        {
+            Some(id) if self.doc.get_dictionary(id).is_ok() => id,
+            _ => {
+                let id = self.doc.add_object(Dictionary::new());
+                self.doc.trailer.set("Info", id);
+                id
+            }
+        };
+
+        let info_dict = self.doc.get_dictionary_mut(info_id)?;
+        let mut set_or_remove = |key: &str, value: &Option<String>| match value {
+            Some(val) if !val.trim().is_empty() => {
+                info_dict.set(key, Object::string_literal(val.as_str()));
+            }
+            _ => {
+                info_dict.remove(key.as_bytes());
+            }
+        };
+        set_or_remove("Title", &update.title);
+        set_or_remove("Author", &update.author);
+        set_or_remove("Subject", &update.subject);
+        set_or_remove("Keywords", &update.keywords);
+        set_or_remove("Creator", &update.creator);
+        set_or_remove("Producer", &update.producer);
+        Ok(())
+    }
+
+    /// Strips /Info dictionary, Catalog XMP /Metadata, /PieceInfo, and prunes orphaned objects.
+    pub fn strip_metadata(&mut self) -> Result<(), CoreError> {
+        self.doc.trailer.remove(b"Info");
+        if let Ok(root_id) = self.doc.trailer.get(b"Root").and_then(|o| o.as_reference()) {
+            if let Ok(catalog) = self.doc.get_dictionary_mut(root_id) {
+                catalog.remove(b"Metadata");
+                catalog.remove(b"PieceInfo");
+                catalog.remove(b"SpiderInfo");
+            }
+        }
+        for &page_id in &self.page_ids {
+            if let Ok(page_dict) = self.doc.get_dictionary_mut(page_id) {
+                page_dict.remove(b"Metadata");
+                page_dict.remove(b"PieceInfo");
+            }
+        }
+        self.doc.prune_objects();
+        Ok(())
+    }
+
+    /// Extracts the document's bookmark/outline hierarchy.
+    pub fn get_outline(&self) -> Result<Vec<OutlineItem>, CoreError> {
+        crate::outline::extract_outline(self)
+    }
+
+    /// Merges all pages from external PDF files at `insert_at` (or appends when None).
+    /// Returns the list of newly added object IDs and newly inserted page IDs.
+    pub fn merge_pdfs<P: AsRef<Path>>(
+        &mut self,
+        paths: &[P],
+        insert_at: Option<usize>,
+    ) -> Result<(Vec<ObjectId>, Vec<ObjectId>), CoreError> {
+        let mut all_added = Vec::new();
+        let mut all_new_pages = Vec::new();
+
+        for path in paths {
+            let other = Document::load(path.as_ref())?;
+            let (added, pages) = self.copy_pages_from_document(&other)?;
+            all_added.extend(added);
+            all_new_pages.extend(pages);
+        }
+
+        if all_new_pages.is_empty() {
+            return Ok((all_added, all_new_pages));
+        }
+
+        let pos = insert_at.unwrap_or(self.page_ids.len()).min(self.page_ids.len());
+        let shift = all_new_pages.len();
+
+        let mut new_ids = self.page_ids.clone();
+        for (offset, &pid) in all_new_pages.iter().enumerate() {
+            new_ids.insert(pos + offset, pid);
+        }
+        self.apply_page_ids_to_tree(&new_ids)?;
+        self.page_ids = new_ids;
+
+        // Shift in-memory annotations for pages at or after `pos`
+        if !self.annotations.is_empty() {
+            let old_annots = std::mem::take(&mut self.annotations);
+            for (idx, mut list) in old_annots {
+                let target_idx = if idx >= pos { idx + shift } else { idx };
+                for annot in &mut list {
+                    annot.page_index = target_idx;
+                }
+                self.annotations.insert(target_idx, list);
+            }
+        }
+
+        Ok((all_added, all_new_pages))
+    }
+
+    /// Extracts selected 0-based page indices into a new PDF saved at `target_path`.
+    pub fn extract_pages<P: AsRef<Path>>(
+        &self,
+        pages: &[usize],
+        target_path: P,
+    ) -> Result<(), CoreError> {
+        if pages.is_empty() {
+            return Err(CoreError::InvalidOperation(
+                "No pages specified for extraction".into(),
+            ));
+        }
+        for &p in pages {
+            if p >= self.page_ids.len() {
+                return Err(CoreError::PageOutOfRange(p, self.page_ids.len()));
+            }
+        }
+
+        // Clone and commit any in-memory annotations for extracted pages so they are preserved.
+        let mut source = self.clone();
+        let selected_set: HashSet<usize> = pages.iter().copied().collect();
+        source.annotations.retain(|idx, _| selected_set.contains(idx));
+        crate::annotations::commit_annotations_to_pdf(&mut source)?;
+
+        let mut out_doc = Document::with_version(source.doc.version.clone());
+        let pages_id = out_doc.new_object_id();
+        let mut remap = HashMap::new();
+        let mut new_page_ids = Vec::with_capacity(pages.len());
+
+        for &idx in pages {
+            let src_page_id = source.get_page_id(idx)?;
+            let new_pid = copy_page_object(&source.doc, src_page_id, &mut out_doc, pages_id, &mut remap)?;
+            new_page_ids.push(new_pid);
+        }
+
+        let pages_dict = dictionary! {
+            "Type" => "Pages",
+            "Kids" => new_page_ids.iter().map(|&id| Object::Reference(id)).collect::<Vec<_>>(),
+            "Count" => new_page_ids.len() as i64,
+        };
+        out_doc.objects.insert(pages_id, Object::Dictionary(pages_dict));
+
+        let catalog_id = out_doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        out_doc.trailer.set("Root", catalog_id);
+
+        let mut out_state = DocumentState {
+            doc: out_doc,
+            page_ids: new_page_ids,
+            annotations: HashMap::new(),
+        };
+        out_state.rebuild_page_ids()?;
+        crate::persistence::safe_save(&mut out_state, target_path, false)?;
+        Ok(())
+    }
+
+    fn copy_pages_from_document(
+        &mut self,
+        other: &Document,
+    ) -> Result<(Vec<ObjectId>, Vec<ObjectId>), CoreError> {
+        let root_id = self.doc.trailer.get(b"Root")?.as_reference()?;
+        let root_dict = self.doc.get_dictionary(root_id)?;
+        let pages_id = root_dict.get(b"Pages")?.as_reference()?;
+
+        let mut other_pages: Vec<_> = other.get_pages().into_iter().collect();
+        other_pages.sort_by_key(|(num, _)| *num);
+
+        let mut remap = HashMap::new();
+        let mut new_page_ids = Vec::with_capacity(other_pages.len());
+
+        for (_, src_page_id) in other_pages {
+            let new_pid = copy_page_object(other, src_page_id, &mut self.doc, pages_id, &mut remap)?;
+            new_page_ids.push(new_pid);
+        }
+
+        let added_objects: Vec<ObjectId> = remap.values().copied().collect();
+        Ok((added_objects, new_page_ids))
     }
 
     /// Reorders pages according to the given permutation of indices.
@@ -417,5 +580,113 @@ impl DocumentState {
     pub fn save_to_file<P: AsRef<Path>>(&mut self, path: P) -> Result<(), CoreError> {
         self.doc.save(path)?;
         Ok(())
+    }
+}
+
+fn find_inherited_page_attr(src: &Document, page_id: ObjectId, key: &[u8]) -> Option<Object> {
+    let mut current = src.get_dictionary(page_id).ok();
+    let mut visited = HashSet::new();
+    while let Some(dict) = current {
+        if let Ok(val) = dict.get(key) {
+            return Some(val.clone());
+        }
+        let parent_id = dict.get(b"Parent").ok()?.as_reference().ok()?;
+        if !visited.insert(parent_id) {
+            return None;
+        }
+        current = src.get_dictionary(parent_id).ok();
+    }
+    None
+}
+
+fn copy_page_object(
+    src: &Document,
+    src_page_id: ObjectId,
+    dst: &mut Document,
+    dst_pages_id: ObjectId,
+    remap: &mut HashMap<ObjectId, ObjectId>,
+) -> Result<ObjectId, CoreError> {
+    if let Some(&existing) = remap.get(&src_page_id) {
+        return Ok(existing);
+    }
+
+    let dst_page_id = dst.new_object_id();
+    remap.insert(src_page_id, dst_page_id);
+
+    let mut page_dict = src.get_dictionary(src_page_id)?.clone();
+    // Ensure inherited page attributes are materialized before detaching from source /Pages tree.
+    for key in [b"MediaBox".as_slice(), b"CropBox", b"Resources", b"Rotate"] {
+        if page_dict.get(key).is_err() {
+            if let Some(inherited) = find_inherited_page_attr(src, src_page_id, key) {
+                page_dict.set(key, inherited);
+            }
+        }
+    }
+
+    let mut copied_dict = Dictionary::new();
+    for (k, v) in page_dict.iter() {
+        if k == b"Parent" || k == b"B" || k == b"StructParents" {
+            continue;
+        }
+        let copied_val = deep_copy_object(src, v, dst, remap)?;
+        copied_dict.set(k.clone(), copied_val);
+    }
+    copied_dict.set("Type", "Page");
+    copied_dict.set("Parent", dst_pages_id);
+
+    dst.objects.insert(dst_page_id, Object::Dictionary(copied_dict));
+    Ok(dst_page_id)
+}
+
+fn deep_copy_object(
+    src: &Document,
+    obj: &Object,
+    dst: &mut Document,
+    remap: &mut HashMap<ObjectId, ObjectId>,
+) -> Result<Object, CoreError> {
+    match obj {
+        Object::Reference(src_id) => {
+            if let Some(&dst_id) = remap.get(src_id) {
+                return Ok(Object::Reference(dst_id));
+            }
+            let Ok(target) = src.get_object(*src_id) else {
+                return Ok(Object::Null);
+            };
+            // Avoid accidentally pulling in unrelated page tree nodes if an annotation or action links to another page
+            if let Ok(dict) = target.as_dict() {
+                if dict.get(b"Type").and_then(|o| o.as_name()).ok() == Some(b"Pages") {
+                    return Ok(Object::Null);
+                }
+            }
+            let dst_id = dst.new_object_id();
+            remap.insert(*src_id, dst_id);
+            let copied_target = deep_copy_object(src, target, dst, remap)?;
+            dst.objects.insert(dst_id, copied_target);
+            Ok(Object::Reference(dst_id))
+        }
+        Object::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                out.push(deep_copy_object(src, item, dst, remap)?);
+            }
+            Ok(Object::Array(out))
+        }
+        Object::Dictionary(dict) => {
+            let mut out = Dictionary::new();
+            for (k, v) in dict.iter() {
+                out.set(k.clone(), deep_copy_object(src, v, dst, remap)?);
+            }
+            Ok(Object::Dictionary(out))
+        }
+        Object::Stream(stream) => {
+            let mut out_dict = Dictionary::new();
+            for (k, v) in stream.dict.iter() {
+                out_dict.set(k.clone(), deep_copy_object(src, v, dst, remap)?);
+            }
+            let mut new_stream = lopdf::Stream::new(out_dict, stream.content.clone());
+            new_stream.allows_compression = stream.allows_compression;
+            Ok(Object::Stream(new_stream))
+        }
+        primitive => Ok(primitive.clone()),
     }
 }
