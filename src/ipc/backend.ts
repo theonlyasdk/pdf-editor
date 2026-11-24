@@ -1,6 +1,58 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { AnnotationDto, DocumentDto, PageBox, SearchResult } from "../types/editor";
 
+export interface DocumentMetadataUpdate {
+  title?: string | null;
+  author?: string | null;
+  subject?: string | null;
+  keywords?: string | null;
+  creator?: string | null;
+  producer?: string | null;
+}
+
+export interface AreaRedactItem {
+  page_index: number;
+  rect: PageBox;
+}
+
+export type BatchOverlayKind = "watermark" | "page_numbers" | "header_footer" | "bates";
+
+export type BatchOverlayPosition =
+  | "center"
+  | "top_left"
+  | "top_center"
+  | "top_right"
+  | "bottom_left"
+  | "bottom_center"
+  | "bottom_right";
+
+export interface BatchOverlayOptions {
+  kind: BatchOverlayKind;
+  pages?: number[] | null;
+  text?: string | null;
+  position?: BatchOverlayPosition | null;
+  font_size?: number | null;
+  color?: string | null;
+  opacity?: number | null;
+  rotation?: number | null;
+  margin?: number | null;
+  bates_prefix?: string | null;
+  bates_start?: number | null;
+  bates_digits?: number | null;
+  header_left?: string | null;
+  header_center?: string | null;
+  header_right?: string | null;
+  footer_left?: string | null;
+  footer_center?: string | null;
+  footer_right?: string | null;
+}
+
+export interface OutlineItem {
+  title: string;
+  page_index: number | null;
+  children: OutlineItem[];
+}
+
 async function callIpc<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   if (isTauri()) {
     return invoke<T>(cmd, args);
@@ -49,8 +101,26 @@ export const Backend = {
     return callIpc<DocumentDto>("add_annotation", { annotation });
   },
 
+  async updateAnnotation(annotation: AnnotationDto): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("update_annotation", { annotation });
+  },
+
   async deleteAnnotation(pageIndex: number, annotationId: string): Promise<DocumentDto> {
     return callIpc<DocumentDto>("delete_annotation", { pageIndex, annotationId });
+  },
+
+  async addImageAnnotation(
+    pageIndex: number,
+    rect: PageBox,
+    imageBase64: string,
+    opacity: number
+  ): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("add_image_annotation", {
+      pageIndex,
+      rect,
+      imageBase64,
+      opacity,
+    });
   },
 
   async coverErase(pageIndex: number, rect: PageBox, color: string): Promise<DocumentDto> {
@@ -59,6 +129,52 @@ export const Backend = {
 
   async redactText(pageIndex: number, text: string): Promise<DocumentDto> {
     return callIpc<DocumentDto>("true_redact", { pageIndex, text });
+  },
+
+  async applyAreaRedactions(items: AreaRedactItem[]): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("apply_area_redactions", { items });
+  },
+
+  async updateMetadata(metadata: DocumentMetadataUpdate): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("update_metadata", { metadata });
+  },
+
+  async stripMetadata(): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("strip_metadata");
+  },
+
+  async mergePdf(paths: string[], insertAt?: number | null): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("merge_pdf", { paths, insertAt: insertAt ?? null });
+  },
+
+  async extractPages(pages: number[], targetPath: string): Promise<void> {
+    return callIpc<void>("extract_pages", { pages, targetPath });
+  },
+
+  async exportPagesAsImages(
+    pages: number[],
+    outputDir: string,
+    format: "png" | "jpeg",
+    dpi: number
+  ): Promise<string[]> {
+    return callIpc<string[]>("export_pages_as_images", {
+      pages,
+      outputDir,
+      format,
+      dpi,
+    });
+  },
+
+  async applyWatermarkOrPageNumbers(options: BatchOverlayOptions): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("apply_watermark_or_page_numbers", { options });
+  },
+
+  async getDocumentOutline(): Promise<OutlineItem[]> {
+    return callIpc<OutlineItem[]>("get_document_outline");
+  },
+
+  async detectCropMargins(pageIndex: number): Promise<PageBox> {
+    return callIpc<PageBox>("detect_crop_margins", { pageIndex });
   },
 
   async undo(): Promise<DocumentDto> {
