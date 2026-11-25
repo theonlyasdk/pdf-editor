@@ -20,11 +20,22 @@ export const DEFAULT_PREFERENCES: EditorPreferences = {
   defaultViewMode: "continuous",
   defaultZoom: "100%",
   smoothZoom: false,
+  animateViewTransitions: true,
+  gridRadialFlyIn: false,
+  reopenLastPdf: false,
+  gridColumns: 4,
+  cacheAllPages: false,
   units: "pt",
   author: "User",
   makeBackup: true,
   autosaveIntervalSec: 0,
 };
+
+function clampGridColumns(value: unknown): number {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return DEFAULT_PREFERENCES.gridColumns;
+  return Math.max(1, Math.min(12, Math.round(num)));
+}
 
 function resolveEffectiveTheme(mode: ThemeMode): "light" | "dark" {
   if (mode === "light" || mode === "dark") return mode;
@@ -47,6 +58,7 @@ class EditorState {
   selectedPages: Set<number> = new Set();
   selectedAnnotationId: string | null = null;
   activeSidebarTab: SidebarTab = "thumbnails";
+  propertiesCollapsed: boolean = false;
   pendingRedactions: AreaRedactItem[] = [];
   theme: "light" | "dark" =
     typeof document !== "undefined" && document.documentElement.dataset.theme === "dark" ? "dark" : "light";
@@ -54,7 +66,8 @@ class EditorState {
   cropBox: PageBox | null = null;
   cropRotation: number = 0;
   cropKeepPageSize: boolean = false;
-  sidebarWidth: number = 216;
+  sidebarWidth: number = 232;
+  propertiesWidth: number = 244;
   openingFile: string | null = null;
   documentVersion = 0;
   rasterVersion = 0;
@@ -113,17 +126,36 @@ class EditorState {
       const savedPrefs = localStorage.getItem("pdf_editor_preferences");
       if (savedPrefs) {
         this.preferences = { ...DEFAULT_PREFERENCES, ...JSON.parse(savedPrefs) };
+        this.preferences.animateViewTransitions = this.preferences.animateViewTransitions !== false;
+        this.preferences.gridRadialFlyIn = Boolean(this.preferences.gridRadialFlyIn);
+        this.preferences.reopenLastPdf = Boolean(this.preferences.reopenLastPdf);
+        this.preferences.gridColumns = clampGridColumns(this.preferences.gridColumns);
+        this.preferences.cacheAllPages = Boolean(this.preferences.cacheAllPages);
       } else {
         const savedTheme = localStorage.getItem("pdf_editor_theme");
-      const savedWidth = Number(localStorage.getItem("pdf_editor_sidebar_width"));
-      if (Number.isFinite(savedWidth) && savedWidth >= 160 && savedWidth <= 440) {
-        this.sidebarWidth = Math.round(savedWidth);
-      }
         if (savedTheme === "light" || savedTheme === "dark" || savedTheme === "system") {
           this.preferences.themeMode = savedTheme;
         }
         this.preferences.units = this.toolSettings.units;
         this.preferences.author = this.toolSettings.author;
+      }
+      const savedWidth = Number(localStorage.getItem("pdf_editor_sidebar_width"));
+      if (Number.isFinite(savedWidth) && savedWidth >= 160 && savedWidth <= 440) {
+        this.sidebarWidth = Math.round(savedWidth);
+      }
+      const savedPropsWidth = Number(localStorage.getItem("pdf_editor_properties_width"));
+      if (Number.isFinite(savedPropsWidth) && savedPropsWidth >= 180 && savedPropsWidth <= 460) {
+        this.propertiesWidth = Math.round(savedPropsWidth);
+      }
+      const savedUi = localStorage.getItem("pdf_editor_ui_state");
+      if (savedUi) {
+        const parsedUi = JSON.parse(savedUi);
+        if (parsedUi.activeSidebarTab === "thumbnails" || parsedUi.activeSidebarTab === "outline" || parsedUi.activeSidebarTab === "annotations") {
+          this.activeSidebarTab = parsedUi.activeSidebarTab;
+        }
+        if (typeof parsedUi.propertiesCollapsed === "boolean") {
+          this.propertiesCollapsed = parsedUi.propertiesCollapsed;
+        }
       }
       this.toolSettings.units = this.preferences.units;
       this.toolSettings.author = this.preferences.author;
@@ -154,6 +186,10 @@ class EditorState {
       localStorage.setItem("pdf_editor_preferences", JSON.stringify(this.preferences));
       localStorage.setItem("pdf_editor_theme", this.preferences.themeMode);
       localStorage.setItem("pdf_editor_tool_settings", JSON.stringify(this.toolSettings));
+      localStorage.setItem("pdf_editor_ui_state", JSON.stringify({
+        activeSidebarTab: this.activeSidebarTab,
+        propertiesCollapsed: this.propertiesCollapsed,
+      }));
     } catch {
       // Storage fallback
     }
@@ -209,6 +245,11 @@ class EditorState {
     this.notify();
   }
 
+  getPageRasterKey(pageIndex: number): string {
+    const rev = this.doc?.page_revisions?.[pageIndex];
+    return rev !== undefined ? `${this.documentVersion}:${rev}` : `${this.documentVersion}:${this.rasterVersion}`;
+  }
+
   addRecentFile(path: string) {
     this.recentFiles = [path, ...this.recentFiles.filter((p) => p !== path)].slice(0, 8);
     try {
@@ -256,6 +297,21 @@ class EditorState {
     }
   }
 
+  setPropertiesWidth(width: number, persist = true) {
+    const clamped = Math.max(180, Math.min(460, Math.round(width)));
+    if (this.propertiesWidth !== clamped) {
+      this.propertiesWidth = clamped;
+    }
+    if (persist) {
+      try {
+        localStorage.setItem("pdf_editor_properties_width", String(clamped));
+      } catch {
+        // Storage fallback
+      }
+      this.notify();
+    }
+  }
+
   setCropBox(box: PageBox | null) {
     const page = this.doc?.pages[this.currentPage];
     if (box && page) {
@@ -286,6 +342,10 @@ class EditorState {
 
   setViewMode(mode: ViewMode) {
     this.viewMode = mode;
+    if (this.preferences.defaultViewMode !== mode) {
+      this.preferences.defaultViewMode = mode;
+      this.persistPreferences();
+    }
     this.notify();
   }
 
@@ -299,10 +359,33 @@ class EditorState {
     this.notify();
   }
 
+  replaceRecentFile(oldPath: string, newPath: string) {
+    if (!this.recentFiles.includes(oldPath)) return;
+    this.recentFiles = this.recentFiles.map((p) => (p === oldPath ? newPath : p));
+    try {
+      localStorage.setItem("pdf_editor_recent_files", JSON.stringify(this.recentFiles));
+    } catch {
+      // Graceful storage fallback
+    }
+    this.notify();
+  }
+
   setSidebarTab(tab: SidebarTab) {
     if (this.activeSidebarTab === tab) return;
     this.activeSidebarTab = tab;
+    this.persistPreferences();
     this.notify();
+  }
+
+  setPropertiesCollapsed(collapsed: boolean) {
+    if (this.propertiesCollapsed === collapsed) return;
+    this.propertiesCollapsed = collapsed;
+    this.persistPreferences();
+    this.notify();
+  }
+
+  togglePropertiesCollapsed() {
+    this.setPropertiesCollapsed(!this.propertiesCollapsed);
   }
 
   addPendingRedaction(item: AreaRedactItem) {
@@ -331,6 +414,8 @@ class EditorState {
 
   requestFitWidth() {
     this.zoomFitMode = "fit-width";
+    this.preferences.defaultZoom = "fit-width";
+    this.persistPreferences();
     this.notify();
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("zoom-fit-width"));
@@ -339,6 +424,8 @@ class EditorState {
 
   requestFitPage() {
     this.zoomFitMode = "fit-page";
+    this.preferences.defaultZoom = "fit-page";
+    this.persistPreferences();
     this.notify();
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("zoom-fit-page"));
@@ -362,6 +449,9 @@ class EditorState {
   setCurrentPage(page: number) {
     if (this.doc && page >= 0 && page < this.doc.page_count) {
       if (this.currentPage === page) return;
+      if (this.selectedPages.size === 1 && !this.selectedPages.has(page)) {
+        this.selectedPages.clear();
+      }
       this.currentPage = page;
       this.selectedAnnotationId = null;
       if (this.activeTool === "crop") {
@@ -448,6 +538,21 @@ class EditorState {
 
   updatePreferences(partial: Partial<EditorPreferences>) {
     this.preferences = { ...this.preferences, ...partial };
+    if (partial.reopenLastPdf !== undefined) {
+      this.preferences.reopenLastPdf = Boolean(partial.reopenLastPdf);
+    }
+    if (partial.animateViewTransitions !== undefined) {
+      this.preferences.animateViewTransitions = Boolean(partial.animateViewTransitions);
+    }
+    if (partial.gridRadialFlyIn !== undefined) {
+      this.preferences.gridRadialFlyIn = Boolean(partial.gridRadialFlyIn);
+    }
+    if (partial.gridColumns !== undefined) {
+      this.preferences.gridColumns = clampGridColumns(partial.gridColumns);
+    }
+    if (partial.cacheAllPages !== undefined) {
+      this.preferences.cacheAllPages = Boolean(partial.cacheAllPages);
+    }
     if (partial.themeMode !== undefined) {
       this.theme = resolveEffectiveTheme(this.preferences.themeMode);
       if (typeof document !== "undefined") {
@@ -466,6 +571,9 @@ class EditorState {
 
   resetPreferences() {
     this.preferences = { ...DEFAULT_PREFERENCES };
+    this.viewMode = DEFAULT_PREFERENCES.defaultViewMode;
+    this.activeSidebarTab = "thumbnails";
+    this.propertiesCollapsed = false;
     this.toolSettings = {
       ...this.toolSettings,
       units: DEFAULT_PREFERENCES.units,

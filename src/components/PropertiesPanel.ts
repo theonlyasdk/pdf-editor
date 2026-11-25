@@ -1,4 +1,4 @@
-import { Copy, Lock, PenTool, Scissors, Trash2, Unlock, X } from "lucide";
+import { Copy, Lock, PanelRightClose, PenTool, Scissors, Trash2, Unlock, X } from "lucide";
 import { STRINGS } from "../i18n/strings";
 import { Backend } from "../ipc/backend";
 import { editorState } from "../state/editorState";
@@ -64,16 +64,73 @@ function formatDateDisplay(iso?: string | null): string {
 
 export class PropertiesPanelView {
   private element: HTMLElement;
+  private contentEl: HTMLElement;
+  private resizerEl: HTMLElement;
   private committingCropFields = false;
   private cropScope = "current";
 
   constructor(element: HTMLElement) {
     this.element = element;
     this.element.className = "properties-panel";
+
+    this.resizerEl = document.createElement("div");
+    this.resizerEl.className = "properties-resizer";
+    this.resizerEl.setAttribute("role", "separator");
+    this.resizerEl.setAttribute("aria-orientation", "vertical");
+    this.resizerEl.setAttribute("aria-label", "Resize properties panel");
+    this.resizerEl.tabIndex = 0;
+
+    this.contentEl = document.createElement("div");
+    this.contentEl.className = "properties-panel-inner";
+
+    this.element.replaceChildren(this.resizerEl, this.contentEl);
+    this.bindResizer();
+
     this.render();
     editorState.subscribe(() => this.render());
     window.addEventListener("pending-placement-changed", () => {
       if (editorState.activeTool === "stamp") this.render();
+    });
+  }
+
+  private bindResizer() {
+    let drag: { pointerId: number; startX: number; startWidth: number } | null = null;
+    this.resizerEl.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || editorState.propertiesCollapsed) return;
+      e.preventDefault();
+      this.resizerEl.setPointerCapture(e.pointerId);
+      drag = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startWidth: this.element.getBoundingClientRect().width || editorState.propertiesWidth,
+      };
+      this.element.classList.add("resizing");
+    });
+    this.resizerEl.addEventListener("pointermove", (e) => {
+      if (!drag || e.pointerId !== drag.pointerId) return;
+      const next = Math.max(180, Math.min(460, Math.round(drag.startWidth + (drag.startX - e.clientX))));
+      this.element.style.width = `${next}px`;
+      editorState.setPropertiesWidth(next, false);
+    });
+    const finish = (e: PointerEvent) => {
+      if (!drag || e.pointerId !== drag.pointerId) return;
+      const next = Math.max(180, Math.min(460, Math.round(drag.startWidth + (drag.startX - e.clientX))));
+      drag = null;
+      this.element.classList.remove("resizing");
+      editorState.setPropertiesWidth(next, true);
+    };
+    this.resizerEl.addEventListener("pointerup", finish);
+    this.resizerEl.addEventListener("pointercancel", finish);
+    this.resizerEl.addEventListener("keydown", (e) => {
+      if (editorState.propertiesCollapsed) return;
+      const step = e.shiftKey ? 24 : 10;
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        editorState.setPropertiesWidth(editorState.propertiesWidth + step);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        editorState.setPropertiesWidth(editorState.propertiesWidth - step);
+      }
     });
   }
 
@@ -87,9 +144,21 @@ export class PropertiesPanelView {
     if (editorState.activeTool !== "crop") this.cropScope = "current";
     if (!editorState.doc) {
       this.element.style.display = "none";
+      this.element.classList.remove("collapsed");
+      this.element.removeAttribute("inert");
+      this.element.removeAttribute("aria-hidden");
       return;
     }
+    const collapsed = editorState.propertiesCollapsed;
     this.element.style.display = "flex";
+    this.element.classList.toggle("collapsed", collapsed);
+    this.element.style.width = collapsed ? "0px" : `${editorState.propertiesWidth}px`;
+    this.element.toggleAttribute("inert", collapsed);
+    if (collapsed) {
+      this.element.setAttribute("aria-hidden", "true");
+      return;
+    }
+    this.element.removeAttribute("aria-hidden");
 
     const tool = editorState.activeTool;
     const settings = editorState.toolSettings;
@@ -400,10 +469,15 @@ export class PropertiesPanelView {
       `;
     }
 
-    this.element.innerHTML = `
+    this.contentEl.innerHTML = `
       <div class="panel-header">
         <span class="text-xs font-semibold">${STRINGS.properties.title}</span>
-        ${headerBadge}
+        <div class="panel-header-actions">
+          ${headerBadge}
+          <button type="button" class="ui-button ui-button--tool panel-collapse-btn" id="btn-collapse-properties" title="Collapse Properties panel" aria-label="Collapse Properties panel">
+            ${icon(PanelRightClose, 14)}
+          </button>
+        </div>
       </div>
       <div class="panel-body">
         ${bodyHtml}
@@ -560,6 +634,9 @@ export class PropertiesPanelView {
   }
 
   private bindPanelEvents() {
+    this.element.querySelector("#btn-collapse-properties")?.addEventListener("click", () => {
+      editorState.setPropertiesCollapsed(true);
+    });
     this.bindInspectorEvents();
 
     // Stroke Color Picker

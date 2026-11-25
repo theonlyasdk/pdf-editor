@@ -33,6 +33,11 @@ describe("Preferences, Navigation & Workspace State", () => {
       defaultViewMode: "spread",
       defaultZoom: "fit-width",
       smoothZoom: true,
+      animateViewTransitions: false,
+      gridRadialFlyIn: true,
+      reopenLastPdf: true,
+      gridColumns: 6,
+      cacheAllPages: true,
       units: "mm",
       author: "Alice",
       makeBackup: false,
@@ -43,10 +48,20 @@ describe("Preferences, Navigation & Workspace State", () => {
     expect(editorState.preferences.defaultViewMode).toBe("spread");
     expect(editorState.preferences.defaultZoom).toBe("fit-width");
     expect(editorState.preferences.smoothZoom).toBe(true);
+    expect(editorState.preferences.animateViewTransitions).toBe(false);
+    expect(editorState.preferences.gridRadialFlyIn).toBe(true);
+    expect(editorState.preferences.reopenLastPdf).toBe(true);
+    expect(editorState.preferences.gridColumns).toBe(6);
+    expect(editorState.preferences.cacheAllPages).toBe(true);
     expect(editorState.toolSettings.units).toBe("mm");
     expect(editorState.toolSettings.author).toBe("Alice");
     expect(editorState.preferences.makeBackup).toBe(false);
     expect(editorState.preferences.autosaveIntervalSec).toBe(60);
+
+    editorState.updatePreferences({ gridColumns: 99 });
+    expect(editorState.preferences.gridColumns).toBe(12);
+    editorState.updatePreferences({ gridColumns: 0 });
+    expect(editorState.preferences.gridColumns).toBe(1);
 
     // Updating toolSettings keeps preferences in sync
     editorState.updateToolSettings({ units: "in", author: "Bob" });

@@ -42,6 +42,7 @@ async function fetchDocumentOutline(): Promise<OutlineItem[]> {
 
 export class SidebarTabsView {
   private element: HTMLElement;
+  private tablist: HTMLElement;
   private tabButtons: Map<SidebarTab, HTMLButtonElement> = new Map();
   private thumbnailsPanel: HTMLElement;
   private outlinePanel: HTMLElement;
@@ -56,6 +57,7 @@ export class SidebarTabsView {
   private annotTypeFilter = "all";
   private annotAuthorFilter = "all";
   private lastRenderKey = "";
+  private resizeObserver: ResizeObserver | null = null;
 
   constructor(element: HTMLElement) {
     this.element = element;
@@ -65,6 +67,7 @@ export class SidebarTabsView {
     tablist.className = "sidebar-tablist";
     tablist.setAttribute("role", "tablist");
     tablist.setAttribute("aria-label", "Sidebar views");
+    this.tablist = tablist;
 
     const tabs: Array<{ id: SidebarTab; label: string; iconHtml: string }> = [
       { id: "thumbnails", label: STRINGS.sidebar.thumbnails, iconHtml: icon(Layers, 14) },
@@ -79,8 +82,10 @@ export class SidebarTabsView {
       btn.id = `sidebar-tab-${tab.id}`;
       btn.setAttribute("role", "tab");
       btn.setAttribute("aria-controls", `sidebar-panel-${tab.id}`);
+      btn.setAttribute("aria-label", tab.label);
+      btn.title = tab.label;
       btn.dataset.tab = tab.id;
-      btn.innerHTML = `${tab.iconHtml}<span>${tab.label}</span>`;
+      btn.innerHTML = `${tab.iconHtml}<span class="sidebar-tab-label">${tab.label}</span>`;
       if (tab.id === "annotations") {
         const badge = document.createElement("span");
         badge.className = "sidebar-tab-count";
@@ -108,8 +113,31 @@ export class SidebarTabsView {
     new ThumbnailRailView(this.thumbnailsPanel);
     this.bindResizer(resizer);
 
+    if (typeof ResizeObserver !== "undefined") {
+      this.resizeObserver = new ResizeObserver(() => this.syncTabLabels());
+      this.resizeObserver.observe(this.element);
+    }
+
     this.render();
     editorState.subscribe(() => this.render());
+  }
+
+  private syncTabLabels() {
+    const available = this.tablist.clientWidth;
+    if (available <= 0) return;
+
+    const wasCompact = this.tablist.classList.contains("compact-tabs");
+    if (wasCompact) this.tablist.classList.remove("compact-tabs");
+
+    let needed = 0;
+    for (const btn of this.tabButtons.values()) {
+      const label = btn.querySelector<HTMLElement>(".sidebar-tab-label");
+      const badge = btn.querySelector<HTMLElement>(".sidebar-tab-count:not([hidden])");
+      // icon (14) + horizontal padding (12) + label + badge + gaps
+      needed += 14 + 12 + (label ? Math.ceil(label.getBoundingClientRect().width) + 4 : 0) + (badge ? Math.ceil(badge.getBoundingClientRect().width) + 4 : 0);
+    }
+
+    this.tablist.classList.toggle("compact-tabs", available < needed);
   }
 
   private bindResizer(resizer: HTMLElement) {
@@ -207,6 +235,7 @@ export class SidebarTabsView {
         }
       }
     }
+    this.syncTabLabels();
 
     this.thumbnailsPanel.hidden = activeTab !== "thumbnails";
     this.outlinePanel.hidden = activeTab !== "outline";

@@ -297,11 +297,23 @@ export class CommandPaletteView {
         action: () => editorState.setSidebarTab("annotations"),
       },
       {
+        id: "toggle-properties",
+        category: "View",
+        label: "Toggle Properties Panel",
+        action: () => editorState.togglePropertiesCollapsed(),
+      },
+      {
         id: "toggle-theme",
         category: "View",
         label: "Toggle Light / Dark Theme",
         shortcut: "Ctrl+T",
         action: () => editorState.toggleTheme(),
+      },
+      {
+        id: "about-app",
+        category: "Help",
+        label: "About PDF Editor",
+        action: () => { window.dispatchEvent(new CustomEvent("open-about")); },
       },
 
       // Page Operations

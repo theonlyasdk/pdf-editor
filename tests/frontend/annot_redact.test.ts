@@ -9,8 +9,10 @@ import {
 import {
   cssFontToPdf,
   duplicateAnnotationDto,
+  inkPointsToSvgPath,
   normalizeHexColor,
   pdfFontNormalize,
+  smoothInkPoints,
   updateAnnotationRect,
 } from "../../src/components/drawing";
 import {
@@ -124,5 +126,31 @@ describe("signature placement state", () => {
 
     clearPendingPlacement();
     expect(getPendingPlacement()).toBeNull();
+  });
+
+  it("smooths pen curves while keeping endpoints and 2-point straight lines intact", () => {
+    const straight = smoothInkPoints([
+      { x: 0, y: 0 },
+      { x: 100, y: 100 },
+    ]);
+    expect(straight).toEqual([
+      { x: 0, y: 0 },
+      { x: 100, y: 100 },
+    ]);
+    expect(inkPointsToSvgPath(straight)).toBe("M 0 0 L 100 100");
+
+    const jagged = [
+      { x: 0, y: 0 },
+      { x: 20, y: 40 },
+      { x: 40, y: 0 },
+      { x: 60, y: 40 },
+    ];
+    const smoothed = smoothInkPoints(jagged);
+    expect(smoothed[0]).toEqual({ x: 0, y: 0 });
+    expect(smoothed[smoothed.length - 1]).toEqual({ x: 60, y: 40 });
+    expect(smoothed.length).toBeGreaterThan(jagged.length);
+    const svgPath = inkPointsToSvgPath(smoothed);
+    expect(svgPath.startsWith("M 0 0 Q ")).toBe(true);
+    expect(svgPath.endsWith(" L 60 40")).toBe(true);
   });
 });

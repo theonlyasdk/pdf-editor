@@ -9,6 +9,49 @@ type ActiveMenu = {
 
 let activeMenu: ActiveMenu | null = null;
 let observerStarted = false;
+let labelInterceptorStarted = false;
+
+const triggerMap = new WeakMap<HTMLSelectElement, { trigger: HTMLButtonElement; openMenu: (initialIndex?: number) => void }>();
+
+function resolveLabelSelect(target: EventTarget | null): HTMLSelectElement | null {
+  if (!(target instanceof Element)) return null;
+  const label = target.closest("label");
+  if (!label) return null;
+  const forId = label.getAttribute("for");
+  if (forId) {
+    const el = document.getElementById(forId);
+    if (el instanceof HTMLSelectElement && el.dataset.uiSelectUpgraded === "1") {
+      return el;
+    }
+  }
+  const nested = label.querySelector<HTMLSelectElement>('select[data-ui-select-upgraded="1"]');
+  return nested ?? null;
+}
+
+function ensureLabelInterceptor() {
+  if (labelInterceptorStarted || typeof document === "undefined") return;
+  labelInterceptorStarted = true;
+  document.addEventListener(
+    "mousedown",
+    (e) => {
+      if (e.button !== 0) return;
+      const select = resolveLabelSelect(e.target);
+      if (!select) return;
+      e.preventDefault();
+      triggerMap.get(select)?.openMenu();
+    },
+    true,
+  );
+  document.addEventListener(
+    "click",
+    (e) => {
+      const select = resolveLabelSelect(e.target);
+      if (!select) return;
+      e.preventDefault();
+    },
+    true,
+  );
+}
 
 function getSelectedLabel(select: HTMLSelectElement): string {
   const opt = select.selectedOptions[0] ?? select.options[select.selectedIndex];
@@ -81,6 +124,12 @@ export function upgradeSelect(select: HTMLSelectElement): void {
 
   select.addEventListener("change", sync);
   select.addEventListener("focus", () => trigger.focus());
+  select.addEventListener("mousedown", (e) => e.preventDefault());
+  select.addEventListener("click", (e) => {
+    e.preventDefault();
+    trigger.focus();
+  });
+  ensureLabelInterceptor();
 
   const openMenu = (initialIndex?: number) => {
     if (trigger.disabled) return;
@@ -214,17 +263,33 @@ export function upgradeSelect(select: HTMLSelectElement): void {
       "pointerdown",
       (e) => {
         const target = e.target as Node | null;
-        if (target && (menu.contains(target) || trigger.contains(target))) return;
+        if (target && (menu.contains(target) || trigger.contains(target) || resolveLabelSelect(target) === select)) return;
         close(false);
       },
       { signal: listeners.signal, capture: true }
     );
     window.addEventListener("resize", () => positionMenu(), { signal: listeners.signal });
-    window.addEventListener("scroll", () => close(false), { signal: listeners.signal, capture: true });
+    window.addEventListener(
+      "scroll",
+      (e) => {
+        if (e.target instanceof Node && menu.contains(e.target)) return;
+        close(false);
+      },
+      { signal: listeners.signal, capture: true }
+    );
     window.addEventListener("blur", () => close(false), { signal: listeners.signal });
   };
 
-  trigger.addEventListener("click", () => openMenu());
+  triggerMap.set(select, { trigger, openMenu });
+
+  trigger.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    openMenu();
+  });
+  trigger.addEventListener("click", (e) => {
+    if (e.detail === 0) openMenu();
+  });
   trigger.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();

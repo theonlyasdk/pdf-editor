@@ -1,4 +1,4 @@
-use crate::commands::DocumentCommand;
+use crate::commands::{CommandRenderEffect, DocumentCommand};
 use crate::document::{CoreError, DocumentState};
 use crate::types::PageBox;
 use lopdf::content::{Content, Operation};
@@ -48,6 +48,10 @@ impl DocumentCommand for ResizeCropPages {
 
     fn description(&self) -> String {
         "Crop and Scale Pages".to_string()
+    }
+
+    fn render_effect(&self) -> CommandRenderEffect {
+        CommandRenderEffect::Pages(self.pages.iter().map(|(idx, _, _)| *idx).collect())
     }
 }
 

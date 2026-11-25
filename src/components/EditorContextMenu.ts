@@ -1,12 +1,21 @@
 import {
   ArrowUpRight,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   Copy,
   Crop,
   FilePlus2,
   Hand,
+  Hash,
+  Info,
+  Maximize2,
   MousePointer2,
+  MoveHorizontal,
   RotateCcw,
   RotateCw,
+  Scan,
   Search,
   Trash2,
   ZoomIn,
@@ -27,12 +36,19 @@ interface MenuAction {
   destructive?: boolean;
   color?: string;
   icon?: IconNode;
+  separatorBefore?: boolean;
 }
 
-let closeOpenMenu: (() => void) | null = null;
+let closeOpenMenu: ((restore?: boolean) => void) | null = null;
+let openMenuTrigger: HTMLElement | null = null;
 
 export function showContextMenu(event: MouseEvent, title: string, actions: MenuAction[]) {
   event.preventDefault();
+  const trigger = event.type === "mousedown" && event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  if (trigger && openMenuTrigger === trigger && closeOpenMenu) {
+    closeOpenMenu(true);
+    return;
+  }
   closeOpenMenu?.();
   const returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const menu = document.createElement("div");
@@ -48,11 +64,20 @@ export function showContextMenu(event: MouseEvent, title: string, actions: MenuA
     listeners.abort();
     menu.remove();
     closeOpenMenu = null;
+    openMenuTrigger = null;
     if (restore && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
   };
   closeOpenMenu = close;
+  openMenuTrigger = trigger;
 
+  let renderedCount = 0;
   for (const action of actions) {
+    if (action.separatorBefore && renderedCount > 0) {
+      const sep = document.createElement("div");
+      sep.className = "context-menu-separator";
+      sep.setAttribute("role", "separator");
+      menu.appendChild(sep);
+    }
     const button = document.createElement("button");
     button.type = "button";
     button.className = "context-menu-item";
@@ -78,6 +103,7 @@ export function showContextMenu(event: MouseEvent, title: string, actions: MenuA
       catch (error) { toast.show({ message: String(error), type: "error" }); }
     });
     menu.appendChild(button);
+    renderedCount++;
   }
 
   document.body.appendChild(menu);
@@ -101,7 +127,9 @@ export function showContextMenu(event: MouseEvent, title: string, actions: MenuA
     }
   });
   window.addEventListener("pointerdown", (pointer) => {
-    if (!menu.contains(pointer.target as Node)) close();
+    const target = pointer.target as Node | null;
+    if (target && (menu.contains(target) || (trigger && trigger.contains(target)))) return;
+    close();
   }, { signal: listeners.signal, capture: true });
   window.addEventListener("resize", () => close(), { signal: listeners.signal });
   window.addEventListener("blur", () => close(), { signal: listeners.signal });
@@ -109,42 +137,91 @@ export function showContextMenu(event: MouseEvent, title: string, actions: MenuA
 
 export function showToolMenu(event: MouseEvent, page?: number, annotation?: AnnotationDto) {
   const tool = editorState.activeTool;
+  const doc = editorState.doc;
+  const cur = editorState.currentPage;
+  const total = doc?.page_count ?? 0;
+  const targetPage = page ?? cur;
   const actions: MenuAction[] = [];
+
+  if (annotation) {
+    actions.push({
+      label: "Delete annotation",
+      icon: Trash2,
+      destructive: true,
+      run: async () => {
+        const updated = await Backend.deleteAnnotation(annotation.page_index, annotation.id);
+        editorState.updateDocument(updated);
+      },
+    });
+  }
+
   if (["pen", "highlighter", "rectangle", "circle", "line", "arrow", "freeText", "coverErase"].includes(tool)) {
     const key = tool === "coverErase" ? "coverColor" : "strokeColor";
+    let first = true;
     for (const [label, color] of [["Black", "#252524"], ["Red", "#d53b42"], ["Blue", "#2563eb"], ["Yellow", "#ffe04a"], ["White", "#ffffff"]]) {
-      actions.push({ label, color, run: () => editorState.updateToolSettings({ [key]: color }) });
+      actions.push({ label, color, separatorBefore: first, run: () => editorState.updateToolSettings({ [key]: color }) });
+      first = false;
     }
   }
   if (["pen", "highlighter", "rectangle", "circle", "line", "arrow"].includes(tool)) {
+    let first = true;
     for (const width of [2, 6, 12]) {
-      actions.push({ label: `${width} pt stroke`, run: () => editorState.updateToolSettings({ strokeWidth: width }) });
+      actions.push({ label: `${width} pt stroke`, separatorBefore: first, run: () => editorState.updateToolSettings({ strokeWidth: width }) });
+      first = false;
     }
   }
   if (tool === "crop") {
     actions.push({
       label: "Reset crop to full page",
       icon: Crop,
+      separatorBefore: true,
       run: () => {
         editorState.initCropBoxForCurrentPage();
         editorState.notify();
       },
     });
   }
+
+  if (doc) {
+    actions.push(
+      { label: "Previous page", icon: ChevronLeft, separatorBefore: true, disabled: cur <= 0, run: () => jumpToPage(cur - 1) },
+      { label: "Next page", icon: ChevronRight, disabled: cur >= total - 1, run: () => jumpToPage(cur + 1) },
+      { label: "First page", icon: ChevronsLeft, disabled: cur <= 0, run: () => jumpToPage(0) },
+      { label: "Last page", icon: ChevronsRight, disabled: cur >= total - 1, run: () => jumpToPage(total - 1) },
+      ...(page !== undefined && page !== cur
+        ? [{ label: `Jump to page ${page + 1}`, icon: ArrowUpRight, run: () => jumpToPage(page) }]
+        : []),
+      { label: "Go to page...", icon: Hash, run: () => { window.dispatchEvent(new CustomEvent("open-page-jump")); } },
+    );
+  }
+
   actions.push(
-    { label: "Select tool", icon: MousePointer2, disabled: tool === "select", run: () => editorState.setTool("select") },
-    { label: "Hand tool", icon: Hand, disabled: tool === "hand", run: () => editorState.setTool("hand") },
-    { label: "Find in document", icon: Search, run: () => { window.dispatchEvent(new Event("open-document-search")); } },
-    { label: "Zoom in", icon: ZoomIn, run: () => editorState.zoomIn() },
+    { label: "Zoom in", icon: ZoomIn, separatorBefore: true, run: () => editorState.zoomIn() },
     { label: "Zoom out", icon: ZoomOut, run: () => editorState.zoomOut() },
+    { label: "Actual size (100%)", icon: Scan, disabled: Math.abs(editorState.zoom - 1) < 0.005, run: () => editorState.setZoom(1.0) },
+    { label: "Fit width", icon: MoveHorizontal, disabled: !doc, run: () => editorState.requestFitWidth() },
+    { label: "Fit page", icon: Maximize2, disabled: !doc, run: () => editorState.requestFitPage() },
   );
-  if (annotation) actions.unshift({
-    label: "Delete annotation", icon: Trash2, destructive: true, run: async () => {
-      const updated = await Backend.deleteAnnotation(annotation.page_index, annotation.id);
-      editorState.updateDocument(updated);
-    },
-  });
-  if (page !== undefined) actions.push({ label: `Go to page ${page + 1}`, icon: ArrowUpRight, run: () => jumpToPage(page) });
+
+  if (doc) {
+    const version = editorState.documentVersion;
+    const rotate = async (deg: number) => {
+      const updated = await Backend.rotatePages([targetPage], deg);
+      if (editorState.documentVersion === version) editorState.updateDocument(updated);
+    };
+    actions.push(
+      { label: "Rotate page left", icon: RotateCcw, separatorBefore: true, run: () => rotate(-90) },
+      { label: "Rotate page right", icon: RotateCw, run: () => rotate(90) },
+      { label: "Find in document", icon: Search, run: () => { window.dispatchEvent(new Event("open-document-search")); } },
+      { label: "Document properties", icon: Info, run: () => { window.dispatchEvent(new CustomEvent("open-metadata")); } },
+    );
+  }
+
+  actions.push(
+    { label: "Select tool", icon: MousePointer2, separatorBefore: true, disabled: tool === "select", run: () => editorState.setTool("select") },
+    { label: "Hand tool", icon: Hand, disabled: tool === "hand", run: () => editorState.setTool("hand") },
+  );
+
   showContextMenu(event, STRINGS.tools[tool], actions);
 }
 

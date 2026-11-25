@@ -130,6 +130,7 @@ export interface DocumentDto {
   can_redo: bool;
   is_dirty: bool;
   revision_id: number;
+  page_revisions?: number[];
   annotations?: AnnotationDto[];
 }
 type bool = boolean;
@@ -152,6 +153,11 @@ export interface EditorPreferences {
   defaultViewMode: ViewMode;
   defaultZoom: DefaultZoomMode;
   smoothZoom: boolean;
+  animateViewTransitions: boolean;
+  gridRadialFlyIn: boolean;
+  reopenLastPdf: boolean;
+  gridColumns: number;
+  cacheAllPages: boolean;
   units: MeasurementUnit;
   author: string;
   makeBackup: boolean;

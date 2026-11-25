@@ -70,7 +70,16 @@ export const Backend = {
   },
 
   async renderPage(pageIndex: number, targetWidth: number): Promise<string> {
-    return callIpc<string>("render_page", { pageIndex, targetWidth });
+    const buf = await this.renderPagePng(pageIndex, targetWidth);
+    return URL.createObjectURL(new Blob([buf], { type: "image/png" }));
+  },
+
+  async renderPageRaw(pageIndex: number, targetWidth: number): Promise<ArrayBuffer> {
+    return callIpc<ArrayBuffer>("render_page", { pageIndex, targetWidth, format: "rgba" });
+  },
+
+  async renderPagePng(pageIndex: number, targetWidth: number): Promise<ArrayBuffer> {
+    return callIpc<ArrayBuffer>("render_page", { pageIndex, targetWidth, format: "png" });
   },
 
   async reorderPages(newOrder: number[]): Promise<DocumentDto> {
@@ -203,5 +212,20 @@ export const Backend = {
 
   async getDocumentState(): Promise<DocumentDto> {
     return callIpc<DocumentDto>("get_document_state");
+  },
+
+  async revealInFolder(path: string): Promise<void> {
+    return callIpc<void>("reveal_in_folder", { path });
+  },
+
+  async renameDocument(newName: string): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("rename_document", { newName });
+  },
+
+  async openExternalUrl(url: string): Promise<void> {
+    if (isTauri()) {
+      return callIpc<void>("open_external_url", { url });
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
   },
 };

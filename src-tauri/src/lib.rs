@@ -1,13 +1,25 @@
 pub mod commands;
+pub mod worker_pool;
 
-use commands::AppState;
+use commands::{AppState, SharedState};
 use parking_lot::Mutex;
 use std::sync::Arc;
+use tauri::{Manager, RunEvent, WindowEvent};
+
+pub fn run_render_worker() {
+    worker_pool::run_render_worker();
+}
+
+fn cleanup_app_state(app_handle: &tauri::AppHandle) {
+    if let Some(state) = app_handle.try_state::<SharedState>() {
+        state.lock().clear_for_exit();
+    }
+}
 
 pub fn run() {
     let initial_state = Arc::new(Mutex::new(AppState::new()));
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(initial_state)
@@ -43,7 +55,33 @@ pub fn run() {
             commands::apply_watermark_or_page_numbers,
             commands::get_document_outline,
             commands::detect_crop_margins,
+            commands::reveal_in_folder,
+            commands::rename_document,
+            commands::open_external_url,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| match event {
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::Destroyed,
+            ..
+        } => {
+            let no_other_windows = app_handle
+                .webview_windows()
+                .keys()
+                .all(|k| k == &label);
+            if no_other_windows {
+                cleanup_app_state(app_handle);
+                app_handle.exit(0);
+            }
+        }
+        RunEvent::Exit => {
+            cleanup_app_state(app_handle);
+        }
+        _ => {}
+    });
+
+    std::process::exit(0);
 }

@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-import { Info, ShieldAlert, X } from "lucide";
+import { FolderOpen, Info, ShieldAlert, X } from "lucide";
 import { Backend, DocumentMetadataUpdate } from "../ipc/backend";
 import { editorState } from "../state/editorState";
 import { initExportPrintModal } from "./ExportPrintModal";
@@ -40,6 +40,7 @@ export class MetadataModalView {
   private fileSizeEl: HTMLElement;
   private encryptionEl: HTMLElement;
   private fileNameEl: HTMLElement;
+  private openFolderBtn: HTMLButtonElement;
   private sanitizePanel: HTMLElement;
   private sanitizeTriggerBtn: HTMLButtonElement;
   private saveBtn: HTMLButtonElement;
@@ -80,7 +81,12 @@ export class MetadataModalView {
             </span>
           </div>
         </div>
-        <p class="doc-hint" id="meta-file-name"></p>
+        <div class="doc-file-path-row">
+          <p class="doc-hint doc-file-path-text" id="meta-file-name"></p>
+          <button type="button" class="ui-button ui-button--outline ui-button--tool doc-reveal-folder-btn" id="meta-open-folder-btn" title="Open containing folder" aria-label="Open containing folder">
+            ${icon(FolderOpen, 14)}
+          </button>
+        </div>
 
         <div class="doc-form-grid">
           <div class="doc-field doc-field--full">
@@ -121,7 +127,7 @@ export class MetadataModalView {
         </div>
       </form>
       <div class="doc-modal-footer">
-        <button type="button" class="ui-button ui-button--destructive ui-button--sm" id="meta-sanitize-trigger">
+        <button type="button" class="ui-button ui-button--destructive" id="meta-sanitize-trigger">
           Strip metadata
         </button>
         <div class="doc-modal-footer-actions">
@@ -144,6 +150,7 @@ export class MetadataModalView {
     this.fileSizeEl = this.dialog.querySelector("#meta-stat-size")!;
     this.encryptionEl = this.dialog.querySelector("#meta-security-badge")!;
     this.fileNameEl = this.dialog.querySelector("#meta-file-name")!;
+    this.openFolderBtn = this.dialog.querySelector("#meta-open-folder-btn")!;
     this.sanitizePanel = this.dialog.querySelector("#meta-sanitize-confirm")!;
     this.sanitizeTriggerBtn = this.dialog.querySelector("#meta-sanitize-trigger")!;
     this.saveBtn = this.dialog.querySelector("#meta-save-btn")!;
@@ -185,6 +192,14 @@ export class MetadataModalView {
 
     this.confirmSanitizeBtn.addEventListener("click", () => void this.handleStripMetadata());
 
+    this.openFolderBtn.addEventListener("click", () => {
+      const path = editorState.doc?.file_path;
+      if (!path) return;
+      void Backend.revealInFolder(path).catch((err) => {
+        toast.show({ message: `Could not open folder: ${String(err)}`, type: "error" });
+      });
+    });
+
     this.form.addEventListener("submit", (e) => {
       e.preventDefault();
       void this.handleSave();
@@ -225,6 +240,8 @@ export class MetadataModalView {
     this.encryptionEl.textContent = meta.is_encrypted ? "Encrypted" : "Not encrypted";
     this.encryptionEl.className = meta.is_encrypted ? "ui-badge ui-badge--accent" : "ui-badge";
     this.fileNameEl.textContent = doc.file_path ? `File: ${doc.file_path}` : `File: ${doc.file_name} (unsaved)`;
+    this.openFolderBtn.hidden = !doc.file_path;
+    this.openFolderBtn.disabled = !doc.file_path;
 
     this.titleInput.value = meta.title ?? "";
     this.authorInput.value = meta.author ?? "";

@@ -11,6 +11,7 @@ pub mod resize_crop;
 pub mod types;
 
 pub use document::{CoreError, DocumentState};
+pub use lopdf::ObjectId;
 pub use persistence::safe_save;
 pub use range_parser::{parse_page_range, RangeParseError};
 pub use renderer::PdfRenderer;

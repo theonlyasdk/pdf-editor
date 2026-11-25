@@ -2,6 +2,64 @@ import type { AnnotationDto, PageBox, ToolSettings, ToolType } from "../types/ed
 
 export interface DrawPoint { x: number; y: number }
 
+export function filterInkPoints(points: DrawPoint[], minStep = 1.5): DrawPoint[] {
+  if (points.length <= 2) return points.map((p) => ({ ...p }));
+  const filtered: DrawPoint[] = [{ ...points[0] }];
+  for (let i = 1; i < points.length - 1; i++) {
+    const prev = filtered[filtered.length - 1];
+    const curr = points[i];
+    if (Math.hypot(curr.x - prev.x, curr.y - prev.y) >= minStep) {
+      filtered.push({ ...curr });
+    }
+  }
+  const last = points[points.length - 1];
+  const prev = filtered[filtered.length - 1];
+  if (Math.hypot(last.x - prev.x, last.y - prev.y) > 0.01 || filtered.length === 1) {
+    filtered.push({ ...last });
+  }
+  return filtered;
+}
+
+export function smoothInkPoints(points: DrawPoint[], passes = 2): DrawPoint[] {
+  let curr = filterInkPoints(points, 1.5);
+  if (curr.length <= 2) return curr;
+  for (let pass = 0; pass < passes; pass++) {
+    const next: DrawPoint[] = [curr[0]];
+    for (let i = 0; i < curr.length - 1; i++) {
+      const p0 = curr[i];
+      const p1 = curr[i + 1];
+      if (i > 0) {
+        next.push({ x: 0.75 * p0.x + 0.25 * p1.x, y: 0.75 * p0.y + 0.25 * p1.y });
+      }
+      if (i < curr.length - 2) {
+        next.push({ x: 0.25 * p0.x + 0.75 * p1.x, y: 0.25 * p0.y + 0.75 * p1.y });
+      }
+    }
+    next.push(curr[curr.length - 1]);
+    curr = next;
+  }
+  return curr;
+}
+
+export function inkPointsToSvgPath(points: DrawPoint[]): string {
+  if (points.length === 0) return "";
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
+  if (points.length === 2) {
+    return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
+  }
+  const parts = [`M ${points[0].x} ${points[0].y}`];
+  for (let i = 1; i < points.length - 1; i++) {
+    const p = points[i];
+    const next = points[i + 1];
+    const midX = (p.x + next.x) / 2;
+    const midY = (p.y + next.y) / 2;
+    parts.push(`Q ${p.x} ${p.y} ${midX} ${midY}`);
+  }
+  const last = points[points.length - 1];
+  parts.push(`L ${last.x} ${last.y}`);
+  return parts.join(" ");
+}
+
 export interface AreaRedactItem {
   page_index: number;
   rect: PageBox;
@@ -131,9 +189,10 @@ export function buildAnnotation(tool: ToolType, page: number, points: DrawPoint[
   if (!type) return null;
   const { stroke, width, opacity } = drawingStyle(tool, settings);
   const hasPath = type === "Ink" || type === "Line" || type === "Arrow";
-  let rect = drawingBox(points, ["Ink", "Line", "Arrow"].includes(type) ? width : 0);
+  const finalPoints = tool === "pen" ? smoothInkPoints(points) : points;
+  let rect = drawingBox(finalPoints, ["Ink", "Line", "Arrow"].includes(type) ? width : 0);
   if (type === "FreeText" || type === "StickyNote" || type === "Stamp") {
-    rect = { ...points[0], width: type === "StickyNote" ? 22 : 168, height: type === "StickyNote" ? 22 : type === "Stamp" ? 40 : Math.max(32, (text?.split("\n").length || 1) * settings.fontSize * 1.2 + 10) };
+    rect = { ...finalPoints[0], width: type === "StickyNote" ? 22 : 168, height: type === "StickyNote" ? 22 : type === "Stamp" ? 40 : Math.max(32, (text?.split("\n").length || 1) * settings.fontSize * 1.2 + 10) };
   }
 
   return {
@@ -143,7 +202,7 @@ export function buildAnnotation(tool: ToolType, page: number, points: DrawPoint[
       font_size: settings.fontSize,
       font_family: cssFontToPdf(settings.fontFamily),
     } : {}),
-    points: hasPath ? [points] : null, text, author: settings.author,
+    points: hasPath ? [finalPoints] : null, text, author: settings.author,
     modified_date: new Date().toISOString(), locked: false,
   };
 }

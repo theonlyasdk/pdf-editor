@@ -411,13 +411,44 @@ fn generate_appearance_stream(annot: &AnnotationDto, r: f64, g: f64, b: f64) -> 
             if let Some(ref point_lists) = annot.points {
                 for line in point_lists {
                     if let Some(first) = line.first() {
-                        let rel_x = first.x - annot.rect.x;
-                        let rel_y = first.y - annot.rect.y;
-                        ops.push(Operation::new("m", vec![rel_x.into(), rel_y.into()]));
-                        for pt in line.iter().skip(1) {
-                            let rx = pt.x - annot.rect.x;
-                            let ry = pt.y - annot.rect.y;
+                        let mut prev_x = first.x - annot.rect.x;
+                        let mut prev_y = first.y - annot.rect.y;
+                        ops.push(Operation::new("m", vec![prev_x.into(), prev_y.into()]));
+                        if line.len() == 2 {
+                            let rx = line[1].x - annot.rect.x;
+                            let ry = line[1].y - annot.rect.y;
                             ops.push(Operation::new("l", vec![rx.into(), ry.into()]));
+                        } else if line.len() >= 3 {
+                            for i in 1..(line.len() - 1) {
+                                let cx = line[i].x - annot.rect.x;
+                                let cy = line[i].y - annot.rect.y;
+                                let nx = line[i + 1].x - annot.rect.x;
+                                let ny = line[i + 1].y - annot.rect.y;
+                                let end_x = (cx + nx) * 0.5;
+                                let end_y = (cy + ny) * 0.5;
+                                let c1x = prev_x + (2.0 / 3.0) * (cx - prev_x);
+                                let c1y = prev_y + (2.0 / 3.0) * (cy - prev_y);
+                                let c2x = end_x + (2.0 / 3.0) * (cx - end_x);
+                                let c2y = end_y + (2.0 / 3.0) * (cy - end_y);
+                                ops.push(Operation::new(
+                                    "c",
+                                    vec![
+                                        c1x.into(),
+                                        c1y.into(),
+                                        c2x.into(),
+                                        c2y.into(),
+                                        end_x.into(),
+                                        end_y.into(),
+                                    ],
+                                ));
+                                prev_x = end_x;
+                                prev_y = end_y;
+                            }
+                            let last = line.last().unwrap();
+                            ops.push(Operation::new(
+                                "l",
+                                vec![(last.x - annot.rect.x).into(), (last.y - annot.rect.y).into()],
+                            ));
                         }
                         ops.push(Operation::new("S", vec![]));
                     }

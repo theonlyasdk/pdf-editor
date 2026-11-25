@@ -1,6 +1,8 @@
 /// <reference types="vite/client" />
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ZoomIn, ZoomOut } from "lucide";
+import { AboutModalView } from "./components/AboutModal";
 import { CanvasViewportView } from "./components/CanvasView";
 import { CommandPaletteView } from "./components/CommandPalette";
 import { DocumentSearchView } from "./components/DocumentSearch";
@@ -13,7 +15,10 @@ import { SidebarTabsView } from "./components/SidebarTabs";
 import { toast } from "./components/Toast";
 import { ToolbarView } from "./components/Toolbar";
 import { guardedOpenPdf, initWindowCloseGuard } from "./components/UnsavedGuard";
+import { openPdf } from "./components/OpenPdf";
 import { initCustomSelects } from "./components/ui/Select";
+import { icon } from "./components/ui/icon";
+import { STRINGS } from "./i18n/strings";
 import { Backend } from "./ipc/backend";
 import { editorState } from "./state/editorState";
 
@@ -138,20 +143,44 @@ function openStatusPageJump() {
   });
 }
 
+function setupStatusBarZoomControls() {
+  const zoomOutBtn = document.getElementById("btn-zoom-out") as HTMLButtonElement | null;
+  const zoomInBtn = document.getElementById("btn-zoom-in") as HTMLButtonElement | null;
+  if (zoomOutBtn) {
+    zoomOutBtn.innerHTML = icon(ZoomOut);
+    zoomOutBtn.title = STRINGS.viewModes.zoomOut;
+    zoomOutBtn.setAttribute("aria-label", STRINGS.viewModes.zoomOut);
+    zoomOutBtn.addEventListener("click", () => editorState.zoomOut());
+  }
+  if (zoomInBtn) {
+    zoomInBtn.innerHTML = icon(ZoomIn);
+    zoomInBtn.title = STRINGS.viewModes.zoomIn;
+    zoomInBtn.setAttribute("aria-label", STRINGS.viewModes.zoomIn);
+    zoomInBtn.addEventListener("click", () => editorState.zoomIn());
+  }
+}
+
 function updateStatusBar() {
   const pageInfoSpan = document.getElementById("status-page-info");
+  const zoomControls = document.getElementById("status-zoom-controls");
   const zoomInfoSpan = document.getElementById("status-zoom-info");
+  const zoomOutBtn = document.getElementById("btn-zoom-out") as HTMLButtonElement | null;
+  const zoomInBtn = document.getElementById("btn-zoom-in") as HTMLButtonElement | null;
 
   if (!editorState.doc) {
     isEditingPageJump = false;
     if (pageInfoSpan) pageInfoSpan.textContent = "Ready";
+    if (zoomControls) zoomControls.hidden = true;
     if (zoomInfoSpan) zoomInfoSpan.textContent = "";
     return;
   }
 
+  if (zoomControls) zoomControls.hidden = false;
   if (zoomInfoSpan) {
     zoomInfoSpan.textContent = `${Math.round(editorState.zoom * 100)}%`;
   }
+  if (zoomOutBtn) zoomOutBtn.disabled = editorState.zoom <= 0.1001;
+  if (zoomInBtn) zoomInBtn.disabled = editorState.zoom >= 7.9999;
 
   if (isEditingPageJump || !pageInfoSpan) return;
 
@@ -259,6 +288,7 @@ document.addEventListener("DOMContentLoaded", () => {
   new DocumentSearchView();
   new PreferencesModalView();
   new ShortcutsModalView();
+  new AboutModalView();
   initExternalModals();
 
   const loading = document.getElementById("document-loading")!;
@@ -274,8 +304,18 @@ document.addEventListener("DOMContentLoaded", () => {
   setupWindowDragDrop();
   initWindowCloseGuard();
   setupAutosave();
+  setupStatusBarZoomControls();
 
   editorState.subscribe(updateStatusBar);
   updateStatusBar();
   void revealWindow().catch(console.error);
+
+  if (
+    isTauri() &&
+    editorState.preferences.reopenLastPdf &&
+    !editorState.doc &&
+    editorState.recentFiles.length > 0
+  ) {
+    void openPdf(editorState.recentFiles[0]);
+  }
 });

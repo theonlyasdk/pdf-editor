@@ -3,10 +3,21 @@ use crate::types::{AnnotationDto, DocumentMetadataUpdate, PageBox};
 use lopdf::{Dictionary, Object, ObjectId};
 use std::collections::{HashMap, HashSet};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandRenderEffect {
+    None,
+    Pages(Vec<usize>),
+    Structural,
+}
+
 pub trait DocumentCommand: Send + Sync {
     fn execute(&mut self, doc: &mut DocumentState) -> Result<(), CoreError>;
     fn undo(&mut self, doc: &mut DocumentState) -> Result<(), CoreError>;
     fn description(&self) -> String;
+
+    fn render_effect(&self) -> CommandRenderEffect {
+        CommandRenderEffect::Structural
+    }
 }
 
 pub struct CommandManager {
@@ -29,34 +40,59 @@ impl CommandManager {
     pub fn execute(
         &mut self,
         doc: &mut DocumentState,
-        mut command: Box<dyn DocumentCommand>,
+        command: Box<dyn DocumentCommand>,
     ) -> Result<(), CoreError> {
+        self.execute_tracked(doc, command).map(|_| ())
+    }
+
+    pub fn execute_tracked(
+        &mut self,
+        doc: &mut DocumentState,
+        mut command: Box<dyn DocumentCommand>,
+    ) -> Result<CommandRenderEffect, CoreError> {
+        let effect = command.render_effect();
         command.execute(doc)?;
         self.undo_stack.push(command);
         self.redo_stack.clear();
         self.revision_id += 1;
-        Ok(())
+        Ok(effect)
     }
 
     pub fn undo(&mut self, doc: &mut DocumentState) -> Result<Option<String>, CoreError> {
+        self.undo_tracked(doc).map(|opt| opt.map(|(desc, _)| desc))
+    }
+
+    pub fn undo_tracked(
+        &mut self,
+        doc: &mut DocumentState,
+    ) -> Result<Option<(String, CommandRenderEffect)>, CoreError> {
         if let Some(mut cmd) = self.undo_stack.pop() {
+            let effect = cmd.render_effect();
             cmd.undo(doc)?;
             let desc = cmd.description();
             self.redo_stack.push(cmd);
             self.revision_id += 1;
-            Ok(Some(desc))
+            Ok(Some((desc, effect)))
         } else {
             Ok(None)
         }
     }
 
     pub fn redo(&mut self, doc: &mut DocumentState) -> Result<Option<String>, CoreError> {
+        self.redo_tracked(doc).map(|opt| opt.map(|(desc, _)| desc))
+    }
+
+    pub fn redo_tracked(
+        &mut self,
+        doc: &mut DocumentState,
+    ) -> Result<Option<(String, CommandRenderEffect)>, CoreError> {
         if let Some(mut cmd) = self.redo_stack.pop() {
+            let effect = cmd.render_effect();
             cmd.execute(doc)?;
             let desc = cmd.description();
             self.undo_stack.push(cmd);
             self.revision_id += 1;
-            Ok(Some(desc))
+            Ok(Some((desc, effect)))
         } else {
             Ok(None)
         }
@@ -139,6 +175,10 @@ impl DocumentCommand for RotatePagesCommand {
     fn description(&self) -> String {
         format!("Rotate Pages by {}°", self.delta_deg)
     }
+
+    fn render_effect(&self) -> CommandRenderEffect {
+        CommandRenderEffect::Pages(self.pages.clone())
+    }
 }
 
 pub struct CropPagesCommand {
@@ -164,6 +204,10 @@ impl DocumentCommand for CropPagesCommand {
 
     fn description(&self) -> String {
         "Crop Pages".to_string()
+    }
+
+    fn render_effect(&self) -> CommandRenderEffect {
+        CommandRenderEffect::Pages(self.pages.clone())
     }
 }
 
@@ -247,6 +291,10 @@ impl DocumentCommand for AddAnnotationCommand {
     fn description(&self) -> String {
         format!("Add {:?} Annotation", self.annotation.annot_type)
     }
+
+    fn render_effect(&self) -> CommandRenderEffect {
+        CommandRenderEffect::Pages(vec![self.page_index])
+    }
 }
 
 pub struct DeleteAnnotationCommand {
@@ -270,6 +318,10 @@ impl DocumentCommand for DeleteAnnotationCommand {
 
     fn description(&self) -> String {
         "Delete Annotation".to_string()
+    }
+
+    fn render_effect(&self) -> CommandRenderEffect {
+        CommandRenderEffect::Pages(vec![self.page_index])
     }
 }
 
@@ -300,6 +352,10 @@ impl DocumentCommand for ModifyAnnotationCommand {
 
     fn description(&self) -> String {
         "Modify Annotation".to_string()
+    }
+
+    fn render_effect(&self) -> CommandRenderEffect {
+        CommandRenderEffect::Pages(vec![self.page_index])
     }
 }
 
@@ -361,6 +417,10 @@ impl DocumentCommand for UpdateMetadataCommand {
 
     fn description(&self) -> String {
         "Update Metadata".to_string()
+    }
+
+    fn render_effect(&self) -> CommandRenderEffect {
+        CommandRenderEffect::None
     }
 }
 
@@ -498,6 +558,10 @@ impl DocumentCommand for StripMetadataCommand {
 
     fn description(&self) -> String {
         "Strip Metadata".to_string()
+    }
+
+    fn render_effect(&self) -> CommandRenderEffect {
+        CommandRenderEffect::None
     }
 }
 

@@ -1,4 +1,4 @@
-import { RotateCcw, Settings, Trash2, X } from "lucide";
+import { AlertTriangle, RotateCcw, Settings, Trash2, X } from "lucide";
 import { STRINGS } from "../i18n/strings";
 import { editorState } from "../state/editorState";
 import { DefaultZoomMode, MeasurementUnit, ThemeMode, ViewMode } from "../types/editor";
@@ -94,6 +94,21 @@ export class PreferencesModalView {
               <span>${STRINGS.preferences.smoothZoom}</span>
             </label>
 
+            <label class="ui-check prefs-check">
+              <input type="checkbox" id="prefs-animate-view-transitions" ${prefs.animateViewTransitions ? "checked" : ""} />
+              <span>${STRINGS.preferences.animateViewTransitions}</span>
+            </label>
+
+            <label class="ui-check prefs-check">
+              <input type="checkbox" id="prefs-grid-radial-fly" ${prefs.gridRadialFlyIn ? "checked" : ""} />
+              <span>${STRINGS.preferences.gridRadialFlyIn}</span>
+            </label>
+
+            <label class="ui-check prefs-check">
+              <input type="checkbox" id="prefs-reopen-last-pdf" ${prefs.reopenLastPdf ? "checked" : ""} />
+              <span>${STRINGS.preferences.reopenLastPdf}</span>
+            </label>
+
             <div class="prefs-row">
               <label class="prefs-label" for="prefs-units">${STRINGS.preferences.units}</label>
               <select class="ui-input" id="prefs-units">
@@ -106,6 +121,32 @@ export class PreferencesModalView {
             <div class="prefs-row">
               <label class="prefs-label" for="prefs-author">${STRINGS.preferences.author}</label>
               <input type="text" class="ui-input" id="prefs-author" placeholder="User" />
+            </div>
+          </section>
+
+          <section class="prefs-section">
+            <h3 class="prefs-section-title">${STRINGS.preferences.gridAndMemory}</h3>
+
+            <div class="prefs-row">
+              <label class="prefs-label" for="prefs-grid-columns">${STRINGS.preferences.gridColumns}</label>
+              <select class="ui-input" id="prefs-grid-columns">
+                ${[2, 3, 4, 5, 6, 8, 10, 12]
+                  .map(
+                    (cols) =>
+                      `<option value="${cols}" ${prefs.gridColumns === cols ? "selected" : ""}>${cols} columns${cols === 4 ? " (Default)" : ""}</option>`,
+                  )
+                  .join("")}
+              </select>
+            </div>
+
+            <label class="ui-check prefs-check">
+              <input type="checkbox" id="prefs-cache-all-pages" ${prefs.cacheAllPages ? "checked" : ""} />
+              <span>${STRINGS.preferences.cacheAllPages}</span>
+            </label>
+
+            <div class="ui-alert ui-alert--warning prefs-warning" id="prefs-cache-warning" role="alert" ${prefs.cacheAllPages ? "" : "hidden"}>
+              ${icon(AlertTriangle, 16)}
+              <span>${STRINGS.preferences.cacheAllPagesWarning}</span>
             </div>
           </section>
 
@@ -178,6 +219,18 @@ export class PreferencesModalView {
       editorState.updatePreferences({ smoothZoom: (e.target as HTMLInputElement).checked });
     });
 
+    this.dialog.querySelector<HTMLInputElement>("#prefs-animate-view-transitions")?.addEventListener("change", (e) => {
+      editorState.updatePreferences({ animateViewTransitions: (e.target as HTMLInputElement).checked });
+    });
+
+    this.dialog.querySelector<HTMLInputElement>("#prefs-grid-radial-fly")?.addEventListener("change", (e) => {
+      editorState.updatePreferences({ gridRadialFlyIn: (e.target as HTMLInputElement).checked });
+    });
+
+    this.dialog.querySelector<HTMLInputElement>("#prefs-reopen-last-pdf")?.addEventListener("change", (e) => {
+      editorState.updatePreferences({ reopenLastPdf: (e.target as HTMLInputElement).checked });
+    });
+
     this.dialog.querySelector<HTMLSelectElement>("#prefs-units")?.addEventListener("change", (e) => {
       editorState.updatePreferences({ units: (e.target as HTMLSelectElement).value as MeasurementUnit });
     });
@@ -186,6 +239,24 @@ export class PreferencesModalView {
       const val = authorInput.value.trim() || "User";
       authorInput.value = val;
       editorState.updatePreferences({ author: val });
+    });
+
+    this.dialog.querySelector<HTMLSelectElement>("#prefs-grid-columns")?.addEventListener("change", (e) => {
+      editorState.updatePreferences({ gridColumns: Number((e.target as HTMLSelectElement).value) || 4 });
+    });
+
+    const cacheWarning = this.dialog.querySelector<HTMLElement>("#prefs-cache-warning");
+    this.dialog.querySelector<HTMLInputElement>("#prefs-cache-all-pages")?.addEventListener("change", (e) => {
+      const checked = (e.target as HTMLInputElement).checked;
+      if (cacheWarning) cacheWarning.hidden = !checked;
+      editorState.updatePreferences({ cacheAllPages: checked });
+      if (checked) {
+        toast.show({
+          message: "All-page memory caching enabled. Large PDFs may use heavy RAM or crash.",
+          type: "warning",
+          durationMs: 4500,
+        });
+      }
     });
 
     this.dialog.querySelector<HTMLInputElement>("#prefs-make-backup")?.addEventListener("change", (e) => {

@@ -147,27 +147,28 @@ export async function guardedCloseDocument(): Promise<void> {
 }
 
 export function initWindowCloseGuard() {
-  window.addEventListener("beforeunload", (event) => {
-    if (editorState.doc?.is_dirty && !bypassWindowClose) {
-      event.preventDefault();
-      event.returnValue = "";
-    }
-  });
-
-  if (isTauri()) {
-    const win = getCurrentWindow();
-    void win.onCloseRequested(async (event) => {
-      if (bypassWindowClose || !editorState.doc?.is_dirty) return;
-      event.preventDefault();
-      const proceed = await confirmUnsavedChanges();
-      if (proceed) {
-        bypassWindowClose = true;
-        try {
-          await win.close();
-        } catch {
-          await win.destroy();
-        }
+  if (!isTauri()) {
+    window.addEventListener("beforeunload", (event) => {
+      if (editorState.doc?.is_dirty && !bypassWindowClose) {
+        event.preventDefault();
+        event.returnValue = "";
       }
     });
+    return;
   }
+
+  const win = getCurrentWindow();
+  void win.onCloseRequested(async (event) => {
+    if (bypassWindowClose || !editorState.doc?.is_dirty) return;
+    event.preventDefault();
+    const proceed = await confirmUnsavedChanges();
+    if (proceed) {
+      bypassWindowClose = true;
+      try {
+        await win.close();
+      } catch {
+        await win.destroy();
+      }
+    }
+  });
 }

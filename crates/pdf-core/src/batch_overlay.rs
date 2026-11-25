@@ -1,4 +1,4 @@
-use crate::commands::DocumentCommand;
+use crate::commands::{CommandRenderEffect, DocumentCommand};
 use crate::document::{CoreError, DocumentState};
 use crate::types::{BatchOverlayOptions, OverlayKind, OverlayPosition, PageInfo};
 use lopdf::content::{Content, Operation};
@@ -141,6 +141,13 @@ impl DocumentCommand for BatchOverlayCommand {
             OverlayKind::PageNumbers => "Add Page Numbers".to_string(),
             OverlayKind::HeaderFooter => "Add Headers/Footers".to_string(),
             OverlayKind::Bates => "Apply Bates Numbering".to_string(),
+        }
+    }
+
+    fn render_effect(&self) -> CommandRenderEffect {
+        match &self.options.pages {
+            Some(pages) => CommandRenderEffect::Pages(pages.clone()),
+            None => CommandRenderEffect::Structural,
         }
     }
 }

@@ -1,6 +1,7 @@
 import {
   ArrowRight,
   Brush,
+  ChevronDown,
   Circle,
   Columns2,
   Command,
@@ -19,6 +20,8 @@ import {
   Moon,
   MousePointer2,
   MoveHorizontal,
+  PanelRightClose,
+  PanelRightOpen,
   PanelsTopLeft,
   PenTool,
   Plus,
@@ -42,15 +45,13 @@ import {
   Type,
   Underline,
   Undo2,
-  ZoomIn,
-  ZoomOut,
   Crop,
 } from "lucide";
 import { STRINGS } from "../i18n/strings";
 import { Backend } from "../ipc/backend";
 import { editorState } from "../state/editorState";
 import { ToolType, ViewMode } from "../types/editor";
-import { showToolMenu } from "./EditorContextMenu";
+import { showContextMenu, showToolMenu } from "./EditorContextMenu";
 import { toast } from "./Toast";
 import { guardedPickPdf } from "./UnsavedGuard";
 import { icon } from "./ui/icon";
@@ -58,10 +59,18 @@ import { icon } from "./ui/icon";
 export class ToolbarView {
   private headerElement: HTMLElement;
   private actionToolbarElement: HTMLElement;
+  private lastHeaderKey = "";
+  private lastActionKey = "";
+  private isRenamingDoc = false;
+  private headerResizeObserver: ResizeObserver | null = null;
 
   constructor(header: HTMLElement, actionToolbar: HTMLElement) {
     this.headerElement = header;
     this.actionToolbarElement = actionToolbar;
+    if (typeof ResizeObserver !== "undefined") {
+      this.headerResizeObserver = new ResizeObserver(() => this.syncHeaderCompactMode());
+      this.headerResizeObserver.observe(this.headerElement);
+    }
     this.actionToolbarElement.addEventListener("contextmenu", (event) => {
       const tool = (event.target as Element).closest<HTMLButtonElement>("[data-tool]")?.dataset.tool;
       if (tool) {
@@ -79,39 +88,49 @@ export class ToolbarView {
   }
 
   private renderHeader() {
+    if (this.isRenamingDoc) return;
     const isDocOpen = editorState.doc !== null;
     const docTitle = editorState.doc ? editorState.doc.file_name : STRINGS.app.untitled;
+    const filePath = editorState.doc?.file_path ?? "";
     const isDirty = editorState.doc?.is_dirty ?? false;
     const canUndo = editorState.doc?.can_undo ?? false;
     const canRedo = editorState.doc?.can_redo ?? false;
     const fitMode = editorState.zoomFitMode;
+    const propsCollapsed = editorState.propertiesCollapsed;
+    const headerKey = `${isDocOpen}:${docTitle}:${filePath}:${isDirty}:${canUndo}:${canRedo}:${editorState.viewMode}:${fitMode}:${editorState.theme}:${propsCollapsed}`;
+
+    if (this.lastHeaderKey === headerKey) {
+      return;
+    }
+    this.lastHeaderKey = headerKey;
 
     this.headerElement.innerHTML = `
       <div class="header-left">
-        <div class="app-brand mr-2">
+        <button type="button" class="app-brand mr-2" id="btn-about" title="About ${STRINGS.app.title}" aria-label="About ${STRINGS.app.title}">
           ${icon(FileText)}
-          <span>${STRINGS.app.title}</span>
-        </div>
-        <button class="ui-button ui-button--tool" id="btn-open" title="${STRINGS.menu.open} (${STRINGS.menu.openShortcut})">
+          <span class="app-brand-label">${STRINGS.app.title}</span>
+        </button>
+        <button class="ui-button ui-button--tool" id="btn-file-menu" type="button" title="File menu" aria-label="File menu" aria-haspopup="menu">
           ${icon(FolderOpen)}
-          <span>Open</span>
+          ${icon(ChevronDown, 12)}
+        </button>
+        <button class="ui-button ui-button--tool file-action-expanded" id="btn-open" title="${STRINGS.menu.open} (${STRINGS.menu.openShortcut})">
+          ${icon(FolderOpen)}
         </button>
         <div class="document-controls">
-          <button class="ui-button ui-button--tool" id="btn-save" ${!isDocOpen ? "disabled" : ""} title="${STRINGS.menu.save} (${STRINGS.menu.saveShortcut})">
+          <button class="ui-button ui-button--tool file-action-expanded" id="btn-save" ${!isDocOpen ? "disabled" : ""} title="${STRINGS.menu.save} (${STRINGS.menu.saveShortcut})">
             ${icon(Save)}
-            <span>Save</span>
           </button>
-          <button class="ui-button ui-button--tool" id="btn-save-as" ${!isDocOpen ? "disabled" : ""} title="${STRINGS.menu.saveAs} (${STRINGS.menu.saveAsShortcut})">
+          <button class="ui-button ui-button--tool file-action-expanded" id="btn-save-as" ${!isDocOpen ? "disabled" : ""} title="${STRINGS.menu.saveAs} (${STRINGS.menu.saveAsShortcut})">
             ${icon(Download)}
-            <span>Save As...</span>
           </button>
-          <button class="ui-button ui-button--tool" id="btn-export-print" ${!isDocOpen ? "disabled" : ""} title="${STRINGS.menu.exportPrint}">
+          <button class="ui-button ui-button--tool file-action-expanded" id="btn-export-print" ${!isDocOpen ? "disabled" : ""} title="${STRINGS.menu.exportPrint}">
             ${icon(Printer)}
           </button>
-          <button class="ui-button ui-button--tool" id="btn-metadata" ${!isDocOpen ? "disabled" : ""} title="${STRINGS.menu.metadata}">
+          <button class="ui-button ui-button--tool file-action-expanded" id="btn-metadata" ${!isDocOpen ? "disabled" : ""} title="${STRINGS.menu.metadata}">
             ${icon(Info)}
           </button>
-          <div class="tool-separator"></div>
+          <div class="tool-separator file-action-expanded"></div>
           <button class="ui-button ui-button--tool" id="btn-undo" ${!canUndo ? "disabled" : ""} title="Undo (Ctrl+Z)">
             ${icon(Undo2)}
           </button>
@@ -124,10 +143,10 @@ export class ToolbarView {
       <div class="header-center">
         ${
           isDocOpen
-            ? `<div class="doc-title-badge">
+            ? `<button type="button" class="doc-title-badge" id="btn-rename-doc" aria-label="Rename document">
                 ${isDirty ? `<span class="dirty-indicator" title="Unsaved changes"></span>` : ""}
                 <span class="truncate"></span>
-              </div>`
+              </button>`
             : ""
         }
       </div>
@@ -152,14 +171,7 @@ export class ToolbarView {
 
           <div class="tool-separator"></div>
 
-          <!-- Zoom controls -->
-          <button class="ui-button ui-button--tool" id="btn-zoom-out" title="${STRINGS.viewModes.zoomOut}">
-            ${icon(ZoomOut)}
-          </button>
-          <span class="zoom-readout text-xs font-semibold px-1">${Math.round(editorState.zoom * 100)}%</span>
-          <button class="ui-button ui-button--tool" id="btn-zoom-in" title="${STRINGS.viewModes.zoomIn}">
-            ${icon(ZoomIn)}
-          </button>
+          <!-- Fit & Find controls -->
           <button class="ui-button ui-button--tool ${fitMode === "fit-width" ? "active" : ""}" id="btn-fit-width" title="${STRINGS.viewModes.fitWidth}">
             ${icon(MoveHorizontal)}
           </button>
@@ -168,7 +180,10 @@ export class ToolbarView {
           </button>
 
           <button class="ui-button ui-button--tool" id="btn-find-text" title="Find in document (Ctrl+F)">
-            ${icon(Search)} <span>Find</span>
+            ${icon(Search)}
+          </button>
+          <button class="ui-button ui-button--tool ${!propsCollapsed ? "active" : ""}" id="btn-toggle-properties" title="${propsCollapsed ? "Show Properties panel" : "Hide Properties panel"}">
+            ${propsCollapsed ? icon(PanelRightOpen) : icon(PanelRightClose)}
           </button>
           <div class="tool-separator"></div>
         </div>
@@ -176,7 +191,6 @@ export class ToolbarView {
         <!-- Command Palette Trigger -->
         <button class="ui-button ui-button--tool" id="btn-cmd-palette" title="Command Palette (Ctrl+K)">
           ${icon(Command)}
-          <kbd class="palette-shortcut ms-1">Ctrl+K</kbd>
         </button>
 
         <!-- Keyboard Shortcuts -->
@@ -197,23 +211,46 @@ export class ToolbarView {
     `;
 
     this.headerElement.classList.toggle("has-document", isDocOpen);
-    const title = this.headerElement.querySelector(".doc-title-badge");
+    const title = this.headerElement.querySelector("#btn-rename-doc");
     if (title) {
-      title.setAttribute("title", editorState.doc?.file_path || docTitle);
+      const fullLabel = editorState.doc?.file_path || docTitle;
+      title.setAttribute("title", `${fullLabel} — Click to rename`);
       title.querySelector(".truncate")!.textContent = docTitle;
     }
     this.labelButtons(this.headerElement);
     this.bindHeaderEvents();
+    this.syncHeaderCompactMode();
+  }
+
+  private syncHeaderCompactMode() {
+    const header = this.headerElement;
+    const available = header.clientWidth;
+    if (available <= 0) return;
+
+    const left = header.querySelector<HTMLElement>(".header-left");
+    const right = header.querySelector<HTMLElement>(".header-right");
+    if (!left || !right) return;
+
+    const wasCompact = header.classList.contains("compact-header");
+    if (wasCompact) header.classList.remove("compact-header");
+
+    const padding = 24;
+    const minTitleReserve = editorState.doc ? 140 : 16;
+    const needed = left.scrollWidth + right.scrollWidth + minTitleReserve + padding;
+    const shouldCompact = available < needed;
+    header.classList.toggle("compact-header", shouldCompact);
   }
 
   private labelButtons(container: HTMLElement) {
     for (const button of container.querySelectorAll<HTMLButtonElement>("button[title]")) {
+      if (button.id === "btn-rename-doc") continue;
       button.setAttribute("aria-label", button.title);
       if (
         button.hasAttribute("data-tool") ||
         button.id.startsWith("view-mode-") ||
         button.id === "btn-fit-width" ||
-        button.id === "btn-fit-page"
+        button.id === "btn-fit-page" ||
+        button.id === "btn-toggle-properties"
       ) {
         button.setAttribute("aria-pressed", String(button.classList.contains("active")));
       }
@@ -223,11 +260,17 @@ export class ToolbarView {
   private renderActionToolbar() {
     if (!editorState.doc) {
       this.actionToolbarElement.style.display = "none";
+      this.lastActionKey = "";
       return;
     }
     this.actionToolbarElement.style.display = "flex";
 
     const t = editorState.activeTool;
+    const actionKey = `open:${t}`;
+    if (this.lastActionKey === actionKey) {
+      return;
+    }
+    this.lastActionKey = actionKey;
 
     this.actionToolbarElement.innerHTML = `
       <div class="tool-group">
@@ -343,11 +386,11 @@ export class ToolbarView {
     this.headerElement.querySelector("#btn-find-text")?.addEventListener("click", () => {
       window.dispatchEvent(new Event("open-document-search"));
     });
-    this.headerElement.querySelector("#btn-open")?.addEventListener("click", () => {
-      void guardedPickPdf();
+    this.headerElement.querySelector("#btn-about")?.addEventListener("click", () => {
+      window.dispatchEvent(new CustomEvent("open-about"));
     });
 
-    this.headerElement.querySelector("#btn-save")?.addEventListener("click", async () => {
+    const saveCurrent = async () => {
       if (!editorState.doc) return;
       try {
         if (!editorState.doc.file_path) {
@@ -361,10 +404,42 @@ export class ToolbarView {
       } catch (err: any) {
         toast.show({ message: `Save failed: ${err}`, type: "error" });
       }
+    };
+
+    const fileMenuBtn = this.headerElement.querySelector<HTMLButtonElement>("#btn-file-menu");
+    const openFileMenu = (event: MouseEvent) => {
+      const hasDoc = editorState.doc !== null;
+      showContextMenu(event, "File", [
+        { label: `${STRINGS.menu.open} (${STRINGS.menu.openShortcut})`, icon: FolderOpen, run: () => guardedPickPdf() },
+        { label: `${STRINGS.menu.save} (${STRINGS.menu.saveShortcut})`, icon: Save, disabled: !hasDoc, run: saveCurrent },
+        { label: `${STRINGS.menu.saveAs} (${STRINGS.menu.saveAsShortcut})`, icon: Download, disabled: !hasDoc, run: () => this.handleSaveAs() },
+        { label: STRINGS.menu.exportPrint, icon: Printer, disabled: !hasDoc, run: () => { window.dispatchEvent(new CustomEvent("open-export-print")); } },
+        { label: STRINGS.menu.metadata, icon: Info, disabled: !hasDoc, run: () => { window.dispatchEvent(new CustomEvent("open-metadata")); } },
+      ]);
+    };
+    fileMenuBtn?.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      openFileMenu(event);
+    });
+    fileMenuBtn?.addEventListener("click", (event) => {
+      if (event.detail === 0) openFileMenu(event);
+    });
+
+    this.headerElement.querySelector("#btn-open")?.addEventListener("click", () => {
+      void guardedPickPdf();
+    });
+
+    this.headerElement.querySelector("#btn-save")?.addEventListener("click", () => {
+      void saveCurrent();
     });
 
     this.headerElement.querySelector("#btn-save-as")?.addEventListener("click", () => {
       void this.handleSaveAs();
+    });
+
+    this.headerElement.querySelector("#btn-rename-doc")?.addEventListener("click", () => {
+      this.startInlineRename();
     });
 
     this.headerElement.querySelector("#btn-export-print")?.addEventListener("click", () => {
@@ -383,20 +458,16 @@ export class ToolbarView {
       void editorState.redo();
     });
 
-    this.headerElement.querySelector("#btn-zoom-in")?.addEventListener("click", () => {
-      editorState.zoomIn();
-    });
-
-    this.headerElement.querySelector("#btn-zoom-out")?.addEventListener("click", () => {
-      editorState.zoomOut();
-    });
-
     this.headerElement.querySelector("#btn-fit-width")?.addEventListener("click", () => {
       editorState.requestFitWidth();
     });
 
     this.headerElement.querySelector("#btn-fit-page")?.addEventListener("click", () => {
       editorState.requestFitPage();
+    });
+
+    this.headerElement.querySelector("#btn-toggle-properties")?.addEventListener("click", () => {
+      editorState.togglePropertiesCollapsed();
     });
 
     this.headerElement.querySelector("#btn-theme-toggle")?.addEventListener("click", () => {
@@ -428,6 +499,7 @@ export class ToolbarView {
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
       const target = await save({
+        defaultPath: editorState.doc?.file_path ?? editorState.doc?.file_name,
         filters: [{ name: "PDF Document", extensions: ["pdf"] }],
       });
       if (target && typeof target === "string") {
@@ -439,6 +511,76 @@ export class ToolbarView {
     } catch (err: any) {
       toast.show({ message: `Save As failed: ${err}`, type: "error" });
     }
+  }
+
+  private startInlineRename() {
+    const doc = editorState.doc;
+    const badge = this.headerElement.querySelector<HTMLButtonElement>("#btn-rename-doc");
+    const container = badge?.parentElement;
+    if (!doc || !badge || !container || this.isRenamingDoc) return;
+
+    this.isRenamingDoc = true;
+    const badgeRect = badge.getBoundingClientRect();
+    const oldPath = doc.file_path;
+    const oldName = doc.file_name;
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "doc-title-rename-input";
+    input.value = oldName;
+    input.style.width = `${Math.max(80, Math.round(badgeRect.width))}px`;
+    input.style.height = `${Math.max(24, Math.round(badgeRect.height))}px`;
+    input.setAttribute("aria-label", "Document name");
+
+    container.replaceChildren(input);
+    input.focus();
+    const dotIndex = oldName.toLowerCase().endsWith(".pdf") ? oldName.length - 4 : oldName.length;
+    input.setSelectionRange(0, Math.max(0, dotIndex));
+
+    let finished = false;
+    const finish = async (commit: boolean) => {
+      if (finished) return;
+      finished = true;
+      const nextRaw = input.value.trim();
+      const restored = async () => {
+        this.isRenamingDoc = false;
+        this.lastHeaderKey = "";
+        this.renderHeader();
+      };
+
+      if (!commit || !nextRaw || nextRaw === oldName) {
+        await restored();
+        return;
+      }
+
+      input.disabled = true;
+      try {
+        const updated = await Backend.renameDocument(nextRaw);
+        this.isRenamingDoc = false;
+        this.lastHeaderKey = "";
+        if (oldPath && updated.file_path && oldPath !== updated.file_path) {
+          editorState.replaceRecentFile(oldPath, updated.file_path);
+        }
+        editorState.updateDocument(updated);
+        toast.show({ message: `Renamed to ${updated.file_name}`, type: "success", durationMs: 2200 });
+      } catch (err: any) {
+        toast.show({ message: String(err), type: "error" });
+        await restored();
+      }
+    };
+
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        void finish(true);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        void finish(false);
+      }
+    });
+    input.addEventListener("blur", () => {
+      void finish(true);
+    });
   }
 
   private bindActionToolbarEvents() {

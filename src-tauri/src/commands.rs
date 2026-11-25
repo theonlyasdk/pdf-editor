@@ -1,5 +1,4 @@
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
+use crate::worker_pool::RenderWorkerPool;
 use parking_lot::Mutex;
 use pdf_core::batch_overlay::BatchOverlayCommand;
 use pdf_core::commands::*;
@@ -7,9 +6,11 @@ use pdf_core::document::{CoreError, DocumentState};
 use pdf_core::persistence::safe_save;
 use pdf_core::range_parser::parse_page_range;
 use pdf_core::redaction::{apply_area_redactions as core_apply_area_redactions, apply_cover_erase, apply_true_redact};
-use pdf_core::renderer::PdfRenderer;
+use pdf_core::renderer::{encode_png_fast, encode_rgba_frame, PdfRenderer};
 use pdf_core::types::*;
+use pdf_core::ObjectId;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -28,16 +29,27 @@ pub struct DocumentDto {
     pub can_redo: bool,
     pub is_dirty: bool,
     pub revision_id: u64,
+    #[serde(default)]
+    pub page_revisions: Vec<u64>,
     pub annotations: Vec<AnnotationDto>,
 }
 
 pub struct AppState {
     pub doc: Option<DocumentState>,
     pub current_path: Option<PathBuf>,
+    pub custom_name: Option<String>,
     pub file_size_bytes: u64,
     pub cmd_mgr: CommandManager,
     pub renderer: Option<Arc<PdfRenderer>>,
-    render_source: Option<(u64, Vec<u8>)>,
+    pub worker_pool: Option<Arc<RenderWorkerPool>>,
+    worker_pool_attempted: bool,
+    render_source: Option<(u64, u64, Arc<Vec<u8>>)>,
+    doc_uid: u64,
+    next_page_uid: u64,
+    next_source_id: u64,
+    page_uids: Vec<u64>,
+    page_revisions: Vec<u64>,
+    page_object_ids: Vec<ObjectId>,
 }
 
 impl AppState {
@@ -45,42 +57,227 @@ impl AppState {
         Self {
             doc: None,
             current_path: None,
+            custom_name: None,
             file_size_bytes: 0,
             cmd_mgr: CommandManager::new(),
             renderer: PdfRenderer::new().ok().map(Arc::new),
+            worker_pool: None,
+            worker_pool_attempted: false,
             render_source: None,
+            doc_uid: 0,
+            next_page_uid: 1,
+            next_source_id: 1,
+            page_uids: Vec::new(),
+            page_revisions: Vec::new(),
+            page_object_ids: Vec::new(),
         }
+    }
+
+    fn next_source_id(&mut self) -> u64 {
+        let id = self.next_source_id;
+        self.next_source_id += 1;
+        id
+    }
+
+    fn ensure_worker_pool(&mut self) -> Option<Arc<RenderWorkerPool>> {
+        if self.worker_pool.is_none() && !self.worker_pool_attempted {
+            self.worker_pool_attempted = true;
+            let in_cargo_test = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.file_name() == Some(std::ffi::OsStr::new("deps"))))
+                == Some(true);
+            if !in_cargo_test {
+                self.worker_pool = RenderWorkerPool::spawn_default().map(Arc::new);
+            }
+        }
+        self.worker_pool.clone()
+    }
+
+    fn reset_page_tracking(&mut self, initial_bytes: Option<Vec<u8>>) {
+        self.doc_uid += 1;
+        self.page_uids.clear();
+        self.page_revisions.clear();
+        self.page_object_ids.clear();
+        if let Some(doc) = &self.doc {
+            let count = doc.page_count();
+            self.page_uids.reserve(count);
+            self.page_revisions.resize(count, 1);
+            self.page_object_ids.reserve(count);
+            for i in 0..count {
+                let uid = self.next_page_uid;
+                self.next_page_uid += 1;
+                self.page_uids.push(uid);
+                if let Ok(oid) = doc.get_page_id(i) {
+                    self.page_object_ids.push(oid);
+                }
+            }
+        }
+        if let Some(bytes) = initial_bytes {
+            let revision = self.cmd_mgr.revision_id();
+            let source_id = self.next_source_id();
+            self.render_source = Some((revision, source_id, Arc::new(bytes)));
+        } else {
+            self.render_source = None;
+        }
+    }
+
+    fn sync_structural_page_tracking(&mut self) {
+        let Some(doc) = &self.doc else {
+            self.page_uids.clear();
+            self.page_revisions.clear();
+            self.page_object_ids.clear();
+            return;
+        };
+        let count = doc.page_count();
+        let mut by_oid: HashMap<ObjectId, VecDeque<(u64, u64)>> = HashMap::new();
+        for ((&oid, &uid), &rev) in self
+            .page_object_ids
+            .iter()
+            .zip(&self.page_uids)
+            .zip(&self.page_revisions)
+        {
+            by_oid.entry(oid).or_default().push_back((uid, rev));
+        }
+
+        let mut next_uids = Vec::with_capacity(count);
+        let mut next_revs = Vec::with_capacity(count);
+        let mut next_oids = Vec::with_capacity(count);
+        for i in 0..count {
+            if let Ok(oid) = doc.get_page_id(i) {
+                next_oids.push(oid);
+                if let Some((uid, rev)) = by_oid.get_mut(&oid).and_then(|q| q.pop_front()) {
+                    next_uids.push(uid);
+                    next_revs.push(rev);
+                    continue;
+                }
+            }
+            let uid = self.next_page_uid;
+            self.next_page_uid += 1;
+            next_uids.push(uid);
+            next_revs.push(1);
+        }
+        self.page_uids = next_uids;
+        self.page_revisions = next_revs;
+        self.page_object_ids = next_oids;
+    }
+
+    fn bump_page_revisions(&mut self, pages: &[usize]) {
+        for &p in pages {
+            if let Some(rev) = self.page_revisions.get_mut(p) {
+                *rev += 1;
+            }
+        }
+    }
+
+    fn page_render_tokens(&self) -> Vec<u64> {
+        self.page_uids
+            .iter()
+            .zip(&self.page_revisions)
+            .map(|(&uid, &rev)| ((uid & 0xFFFF_FFFF) << 20) | (rev & 0xF_FFFF))
+            .collect()
+    }
+
+    fn apply_render_effect(&mut self, effect: CommandRenderEffect) {
+        match effect {
+            CommandRenderEffect::None => {}
+            CommandRenderEffect::Pages(pages) => {
+                self.bump_page_revisions(&pages);
+                self.render_source = None;
+            }
+            CommandRenderEffect::Structural => {
+                self.sync_structural_page_tracking();
+                self.render_source = None;
+            }
+        }
+    }
+
+    fn ensure_render_source(&mut self) -> Result<(u64, Arc<Vec<u8>>, Arc<PdfRenderer>), String> {
+        let revision = self.cmd_mgr.revision_id();
+        let needs_rebuild = self
+            .render_source
+            .as_ref()
+            .is_none_or(|(rev, _, _)| *rev != revision);
+        if needs_rebuild {
+            let mut doc = self.doc.as_ref().ok_or("No document open")?.clone();
+            pdf_core::annotations::commit_annotations_to_pdf(&mut doc)
+                .map_err(|e| e.to_string())?;
+            let bytes = doc.to_bytes().map_err(|e| e.to_string())?;
+            let source_id = self.next_source_id();
+            self.render_source = Some((revision, source_id, Arc::new(bytes)));
+        }
+        let (_, source_id, bytes) = self.render_source.as_ref().ok_or("No document open")?;
+        let renderer = self
+            .renderer
+            .as_ref()
+            .ok_or("Renderer not initialized")?
+            .clone();
+        Ok((*source_id, Arc::clone(bytes), renderer))
     }
 
     fn invalidate_render_source(&mut self) {
         self.render_source = None;
-        if let Some(renderer) = &self.renderer {
+    }
+
+    pub fn clear_for_exit(&mut self) {
+        self.doc = None;
+        self.current_path = None;
+        self.custom_name = None;
+        self.file_size_bytes = 0;
+        self.cmd_mgr = CommandManager::new();
+        self.render_source = None;
+        self.page_uids.clear();
+        self.page_revisions.clear();
+        self.page_object_ids.clear();
+        if let Some(pool) = self.worker_pool.take() {
+            pool.shutdown();
+        }
+        if let Some(renderer) = self.renderer.take() {
             renderer.clear_cache();
         }
     }
 
     pub fn execute_cmd(&mut self, cmd: Box<dyn DocumentCommand>) -> Result<(), CoreError> {
-        let doc = self
-            .doc
-            .as_mut()
-            .ok_or_else(|| CoreError::InvalidOperation("No document open".into()))?;
-        self.cmd_mgr.execute(doc, cmd)
+        let effect = {
+            let doc = self
+                .doc
+                .as_mut()
+                .ok_or_else(|| CoreError::InvalidOperation("No document open".into()))?;
+            self.cmd_mgr.execute_tracked(doc, cmd)?
+        };
+        self.apply_render_effect(effect);
+        Ok(())
     }
 
     pub fn undo_cmd(&mut self) -> Result<Option<String>, CoreError> {
-        let doc = self
-            .doc
-            .as_mut()
-            .ok_or_else(|| CoreError::InvalidOperation("No document open".into()))?;
-        self.cmd_mgr.undo(doc)
+        let res = {
+            let doc = self
+                .doc
+                .as_mut()
+                .ok_or_else(|| CoreError::InvalidOperation("No document open".into()))?;
+            self.cmd_mgr.undo_tracked(doc)?
+        };
+        if let Some((desc, effect)) = res {
+            self.apply_render_effect(effect);
+            Ok(Some(desc))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn redo_cmd(&mut self) -> Result<Option<String>, CoreError> {
-        let doc = self
-            .doc
-            .as_mut()
-            .ok_or_else(|| CoreError::InvalidOperation("No document open".into()))?;
-        self.cmd_mgr.redo(doc)
+        let res = {
+            let doc = self
+                .doc
+                .as_mut()
+                .ok_or_else(|| CoreError::InvalidOperation("No document open".into()))?;
+            self.cmd_mgr.redo_tracked(doc)?
+        };
+        if let Some((desc, effect)) = res {
+            self.apply_render_effect(effect);
+            Ok(Some(desc))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn to_dto(&self) -> Result<DocumentDto, String> {
@@ -95,8 +292,9 @@ impl AppState {
             .as_ref()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .unwrap_or("Untitled.pdf")
-            .to_string();
+            .map(ToString::to_string)
+            .or_else(|| self.custom_name.clone())
+            .unwrap_or_else(|| "Untitled.pdf".to_string());
 
         let path_str = self
             .current_path
@@ -134,6 +332,7 @@ impl AppState {
             can_redo: self.cmd_mgr.can_redo(),
             is_dirty: self.cmd_mgr.is_dirty(),
             revision_id: self.cmd_mgr.revision_id(),
+            page_revisions: self.page_render_tokens(),
         })
     }
 }
@@ -178,18 +377,15 @@ pub async fn open_document(
         let mut lock = state.lock();
         lock.doc = Some(doc);
         lock.current_path = Some(p);
+        lock.custom_name = None;
         lock.file_size_bytes = file_size;
         lock.cmd_mgr = CommandManager::new();
 
         if lock.renderer.is_none() {
             lock.renderer = PdfRenderer::new().ok().map(Arc::new);
         }
-
-        let revision = lock.cmd_mgr.revision_id();
-        lock.render_source = Some((revision, bytes));
-        if let Some(renderer) = &lock.renderer {
-            renderer.clear_cache();
-        }
+        lock.ensure_worker_pool();
+        lock.reset_page_tracking(Some(bytes));
 
         Ok(DocumentDto {
             file_path: Some(path),
@@ -202,6 +398,7 @@ pub async fn open_document(
             can_redo: false,
             is_dirty: false,
             revision_id: lock.cmd_mgr.revision_id(),
+            page_revisions: lock.page_render_tokens(),
         })
     })
     .await
@@ -216,14 +413,15 @@ pub fn new_document(state: State<'_, SharedState>) -> Result<DocumentDto, String
     let mut lock = state.lock();
     lock.doc = Some(doc);
     lock.current_path = None;
+    lock.custom_name = None;
     lock.file_size_bytes = 0;
     lock.cmd_mgr = CommandManager::new();
 
     if lock.renderer.is_none() {
         lock.renderer = PdfRenderer::new().ok().map(Arc::new);
     }
-
-    lock.invalidate_render_source();
+    lock.ensure_worker_pool();
+    lock.reset_page_tracking(None);
 
     Ok(DocumentDto {
         file_path: None,
@@ -239,6 +437,7 @@ pub fn new_document(state: State<'_, SharedState>) -> Result<DocumentDto, String
         can_redo: false,
         is_dirty: false,
         revision_id: lock.cmd_mgr.revision_id(),
+        page_revisions: lock.page_revisions.clone(),
     })
 }
 
@@ -246,25 +445,116 @@ pub fn new_document(state: State<'_, SharedState>) -> Result<DocumentDto, String
 pub async fn render_page(
     page_index: usize,
     target_width: u32,
+    format: Option<String>,
     state: State<'_, SharedState>,
-) -> Result<String, String> {
+) -> Result<tauri::ipc::Response, String> {
     let state = Arc::clone(state.inner());
+    let want_png = matches!(format.as_deref(), Some("png"));
     tauri::async_runtime::spawn_blocking(move || {
-        let mut lock = state.lock();
-        let revision = lock.cmd_mgr.revision_id();
-        if lock.render_source.as_ref().map(|(id, _)| *id) != Some(revision) {
-            let mut doc = lock.doc.as_ref().ok_or("No document open")?.clone();
-            pdf_core::annotations::commit_annotations_to_pdf(&mut doc)
-                .map_err(|e| e.to_string())?;
-            let bytes = doc.to_bytes().map_err(|e| e.to_string())?;
-            lock.render_source = Some((revision, bytes));
+        enum RenderPlan {
+            Hit(Arc<pdf_core::renderer::RawBitmap>),
+            Miss {
+                doc_uid: u64,
+                page_uid: u64,
+                page_rev: u64,
+                source_id: u64,
+                bytes: Arc<Vec<u8>>,
+                renderer: Arc<PdfRenderer>,
+                worker_pool: Option<Arc<RenderWorkerPool>>,
+            },
         }
-        let (_, bytes) = lock.render_source.as_ref().ok_or("No document open")?;
-        let renderer = lock.renderer.as_ref().ok_or("Renderer not initialized")?;
-        let png = renderer
-            .render_page_cached(bytes, page_index, target_width, revision, None)
-            .map_err(|e| e.to_string())?;
-        Ok(format!("data:image/png;base64,{}", BASE64.encode(png)))
+
+        let plan = {
+            let mut lock = state.lock();
+            let page_uid = *lock
+                .page_uids
+                .get(page_index)
+                .ok_or_else(|| format!("Page index {} out of range", page_index))?;
+            let page_rev = *lock
+                .page_revisions
+                .get(page_index)
+                .ok_or_else(|| format!("Page index {} out of range", page_index))?;
+            let doc_uid = lock.doc_uid;
+            let renderer = lock
+                .renderer
+                .as_ref()
+                .ok_or("Renderer not initialized")?
+                .clone();
+
+            if let Some(cached) = renderer.get_cached_rgba(doc_uid, page_uid, page_rev, target_width) {
+                RenderPlan::Hit(cached)
+            } else {
+                let (source_id, bytes, _) = lock.ensure_render_source()?;
+                let worker_pool = lock.ensure_worker_pool();
+                RenderPlan::Miss {
+                    doc_uid,
+                    page_uid,
+                    page_rev,
+                    source_id,
+                    bytes,
+                    renderer,
+                    worker_pool,
+                }
+            }
+        };
+
+        let bitmap = match plan {
+            RenderPlan::Hit(cached) => cached,
+            RenderPlan::Miss {
+                doc_uid,
+                page_uid,
+                page_rev,
+                source_id,
+                bytes,
+                renderer,
+                worker_pool,
+            } => {
+                let raw = if let Some(pool) = worker_pool {
+                    match pool.render_page_rgba(source_id, &bytes, page_index, target_width) {
+                        Ok(bmp) => bmp,
+                        Err(_) => renderer
+                            .render_page_rgba_for_source(
+                                source_id,
+                                bytes,
+                                page_index,
+                                target_width,
+                                None,
+                            )
+                            .map_err(|e| e.to_string())?,
+                    }
+                } else {
+                    renderer
+                        .render_page_rgba_for_source(
+                            source_id,
+                            bytes,
+                            page_index,
+                            target_width,
+                            None,
+                        )
+                        .map_err(|e| e.to_string())?
+                };
+                let arc = Arc::new(raw);
+                renderer.put_cached_rgba(
+                    doc_uid,
+                    page_uid,
+                    page_rev,
+                    target_width,
+                    Arc::clone(&arc),
+                );
+                arc
+            }
+        };
+
+        if want_png {
+            let png = encode_png_fast(&bitmap).map_err(|e| e.to_string())?;
+            Ok(tauri::ipc::Response::new(png))
+        } else {
+            let frame = match Arc::try_unwrap(bitmap) {
+                Ok(owned) => owned.frame,
+                Err(shared) => encode_rgba_frame(&shared),
+            };
+            Ok(tauri::ipc::Response::new(frame))
+        }
     })
     .await
     .map_err(|error| error.to_string())?
@@ -394,6 +684,7 @@ pub fn duplicate_pages(
     let doc = lock.doc.as_mut().ok_or("No document open")?;
     doc.duplicate_pages(&pages).map_err(|e| e.to_string())?;
     lock.cmd_mgr.bump_revision_dirty();
+    lock.sync_structural_page_tracking();
     lock.invalidate_render_source();
     lock.to_dto()
 }
@@ -482,6 +773,7 @@ pub fn cover_erase(
         .ok_or("Cover is outside the page")?;
     apply_cover_erase(doc, page_index, rect, &color).map_err(|e| e.to_string())?;
     lock.cmd_mgr.bump_revision_dirty();
+    lock.bump_page_revisions(&[page_index]);
     lock.invalidate_render_source();
     lock.to_dto()
 }
@@ -508,6 +800,7 @@ pub fn true_redact(
     )
     .map_err(|e| e.to_string())?;
     lock.cmd_mgr.bump_revision_dirty();
+    lock.bump_page_revisions(&[page_index]);
     lock.invalidate_render_source();
     lock.to_dto()
 }
@@ -561,6 +854,7 @@ pub fn save_document_as(
         lock.file_size_bytes = meta.len();
     }
     lock.current_path = Some(p);
+    lock.custom_name = None;
     lock.cmd_mgr.mark_saved();
     Ok(())
 }
@@ -578,22 +872,20 @@ pub async fn search_document(
 ) -> Result<Vec<SearchResult>, String> {
     let state = Arc::clone(state.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        let (renderer, bytes, pages) = {
-            let lock = state.lock();
-            let doc = lock.doc.as_ref().ok_or("No document open")?;
-            let renderer = lock.renderer.as_ref().ok_or("Renderer not ready")?.clone();
-            let bytes = match &lock.render_source {
-                Some((revision, bytes)) if *revision == lock.cmd_mgr.revision_id() => bytes.clone(),
-                _ => doc.clone().to_bytes().map_err(|e| e.to_string())?,
+        let (source_id, renderer, bytes, pages) = {
+            let mut lock = state.lock();
+            let pages = {
+                let doc = lock.doc.as_ref().ok_or("No document open")?;
+                (0..doc.page_count())
+                    .map(|index| doc.get_page_info(index))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?
             };
-            let pages = (0..doc.page_count())
-                .map(|index| doc.get_page_info(index))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?;
-            (renderer, bytes, pages)
+            let (source_id, bytes, renderer) = lock.ensure_render_source()?;
+            (source_id, renderer, bytes, pages)
         };
         let mut results = renderer
-            .search_document(&bytes, &query, case_sensitive, None)
+            .search_document_arc(source_id, bytes, &query, case_sensitive, None)
             .map_err(|e| e.to_string())?;
         for hit in &mut results {
             for rect in &mut hit.bounding_boxes {
@@ -721,22 +1013,9 @@ pub async fn export_pages_as_images(
 ) -> Result<Vec<String>, String> {
     let state = Arc::clone(state.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        let (renderer, bytes, stem) = {
+        let (source_id, renderer, bytes, stem) = {
             let mut lock = state.lock();
-            let revision = lock.cmd_mgr.revision_id();
-            if lock.render_source.as_ref().map(|(id, _)| *id) != Some(revision) {
-                let mut doc = lock.doc.as_ref().ok_or("No document open")?.clone();
-                pdf_core::annotations::commit_annotations_to_pdf(&mut doc)
-                    .map_err(|e| e.to_string())?;
-                let encoded = doc.to_bytes().map_err(|e| e.to_string())?;
-                lock.render_source = Some((revision, encoded));
-            }
-            let (_, bytes) = lock.render_source.as_ref().ok_or("No document open")?;
-            let renderer = lock
-                .renderer
-                .as_ref()
-                .ok_or("Renderer not initialized")?
-                .clone();
+            let (source_id, bytes, renderer) = lock.ensure_render_source()?;
             let stem = lock
                 .current_path
                 .as_ref()
@@ -744,11 +1023,12 @@ pub async fn export_pages_as_images(
                 .and_then(|s| s.to_str())
                 .unwrap_or("document")
                 .to_string();
-            (renderer, bytes.clone(), stem)
+            (source_id, renderer, bytes, stem)
         };
         renderer
-            .export_pages_as_images(
-                &bytes,
+            .export_pages_as_images_arc(
+                source_id,
+                bytes,
                 &pages,
                 std::path::Path::new(&output_dir),
                 &stem,
@@ -782,8 +1062,10 @@ pub fn apply_area_redactions(
             rect: pdf_rect,
         });
     }
+    let affected: Vec<usize> = pdf_items.iter().map(|item| item.page_index).collect();
     core_apply_area_redactions(doc, &pdf_items).map_err(|e| e.to_string())?;
     lock.cmd_mgr.bump_revision_dirty();
+    lock.bump_page_revisions(&affected);
     lock.invalidate_render_source();
     lock.to_dto()
 }
@@ -862,34 +1144,217 @@ pub async fn detect_crop_margins(
 ) -> Result<PageBox, String> {
     let state = Arc::clone(state.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        let (renderer, bytes, page_info) = {
+        let (source_id, renderer, bytes, page_info) = {
             let mut lock = state.lock();
-            let revision = lock.cmd_mgr.revision_id();
             let page_info = lock
                 .doc
                 .as_ref()
                 .ok_or("No document open")?
                 .get_page_info(page_index)
                 .map_err(|e| e.to_string())?;
-            if lock.render_source.as_ref().map(|(id, _)| *id) != Some(revision) {
-                let mut doc = lock.doc.as_ref().ok_or("No document open")?.clone();
-                pdf_core::annotations::commit_annotations_to_pdf(&mut doc)
-                    .map_err(|e| e.to_string())?;
-                let encoded = doc.to_bytes().map_err(|e| e.to_string())?;
-                lock.render_source = Some((revision, encoded));
-            }
-            let (_, bytes) = lock.render_source.as_ref().ok_or("No document open")?;
-            let renderer = lock
-                .renderer
-                .as_ref()
-                .ok_or("Renderer not initialized")?
-                .clone();
-            (renderer, bytes.clone(), page_info)
+            let (source_id, bytes, renderer) = lock.ensure_render_source()?;
+            (source_id, renderer, bytes, page_info)
         };
         renderer
-            .detect_crop_margins(&bytes, page_index, page_info.width, page_info.height, None)
+            .detect_crop_margins_arc(source_id, bytes, page_index, page_info.width, page_info.height, None)
             .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn reveal_in_folder(path: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err("File does not exist on disk".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer.exe")
+            .arg("/select,")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dir = target.parent().unwrap_or(&target);
+        std::process::Command::new("xdg-open")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn rename_document(new_name: String, state: State<'_, SharedState>) -> Result<DocumentDto, String> {
+    let trimmed = new_name.trim();
+    if trimmed.is_empty() {
+        return Err("Document name cannot be empty".to_string());
+    }
+    if trimmed == "."
+        || trimmed == ".."
+        || trimmed.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || c.is_control())
+    {
+        return Err("Document name contains invalid filename characters".to_string());
+    }
+
+    let final_name = if trimmed.to_ascii_lowercase().ends_with(".pdf") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}.pdf")
+    };
+
+    let mut lock = state.lock();
+    if lock.doc.is_none() {
+        return Err("No document open".to_string());
+    }
+
+    if let Some(old_path) = lock.current_path.clone() {
+        let target = match old_path.parent() {
+            Some(parent) => parent.join(&final_name),
+            None => PathBuf::from(&final_name),
+        };
+        if target == old_path {
+            return lock.to_dto();
+        }
+        let case_only = old_path
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&target.to_string_lossy());
+        if target.exists() && !case_only {
+            return Err(format!("A file named \"{}\" already exists", final_name));
+        }
+        std::fs::rename(&old_path, &target).map_err(|e| format!("Could not rename file: {e}"))?;
+        lock.current_path = Some(target);
+        lock.custom_name = None;
+    } else {
+        lock.custom_name = Some(final_name);
+    }
+
+    lock.to_dto()
+}
+
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("Only http/https URLs are supported".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_render_tokens_invalidate_only_affected_pages_and_preserve_on_reorder() {
+        let mut doc = DocumentState::new_blank(612.0, 792.0).unwrap();
+        doc.insert_blank_page(1, 612.0, 792.0).unwrap();
+        doc.insert_blank_page(2, 612.0, 792.0).unwrap();
+        let bytes = doc.to_bytes().unwrap();
+
+        let mut state = AppState::new();
+        state.doc = Some(doc);
+        state.reset_page_tracking(Some(bytes));
+
+        let initial_tokens = state.page_render_tokens();
+        assert_eq!(initial_tokens.len(), 3);
+        assert!(state.render_source.is_some());
+
+        // Metadata update should not change page tokens or invalidate render_source
+        state
+            .execute_cmd(Box::new(UpdateMetadataCommand::new(DocumentMetadataUpdate {
+                title: Some("Fast".into()),
+                ..Default::default()
+            })))
+            .unwrap();
+        assert_eq!(state.page_render_tokens(), initial_tokens);
+        assert!(state.render_source.is_some());
+
+        // Annotating page 1 only bumps page 1's token
+        let annot = AnnotationDto {
+            id: "a1".into(),
+            page_index: 1,
+            annot_type: AnnotationType::Square,
+            rect: PageBox::new(10.0, 10.0, 50.0, 50.0),
+            color: "#ff0000".into(),
+            fill_color: None,
+            stroke_width: 2.0,
+            opacity: 1.0,
+            text: None,
+            font_size: None,
+            font_family: None,
+            points: None,
+            author: None,
+            modified_date: None,
+            locked: false,
+            image_base64: None,
+        };
+        state
+            .execute_cmd(Box::new(AddAnnotationCommand {
+                page_index: 1,
+                annotation: annot,
+            }))
+            .unwrap();
+        let after_annot = state.page_render_tokens();
+        assert_eq!(after_annot[0], initial_tokens[0]);
+        assert_ne!(after_annot[1], initial_tokens[1]);
+        assert_eq!(after_annot[2], initial_tokens[2]);
+
+        // Reordering [2, 0, 1] preserves exact page tokens in their new positions
+        let doc_ref = state.doc.as_ref().unwrap();
+        let prev_ids: Vec<_> = (0..3).map(|i| doc_ref.get_page_id(i).unwrap()).collect();
+        let new_ids = vec![prev_ids[2], prev_ids[0], prev_ids[1]];
+        state
+            .execute_cmd(Box::new(ReorderPagesCommand {
+                previous_ids: prev_ids,
+                new_ids,
+            }))
+            .unwrap();
+        let after_reorder = state.page_render_tokens();
+        assert_eq!(after_reorder, vec![after_annot[2], after_annot[0], after_annot[1]]);
+
+        state.clear_for_exit();
+        assert!(state.doc.is_none());
+        assert!(state.page_uids.is_empty());
+    }
 }

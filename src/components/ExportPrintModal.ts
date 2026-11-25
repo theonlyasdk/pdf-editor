@@ -388,6 +388,14 @@ export class ExportPrintModalView {
     const printDpi = Number(this.printDpiSelect.value) || 150;
     this.setBusy(true, "Preparing...");
 
+    const objectUrls: string[] = [];
+    const revokeAll = () => {
+      for (const url of objectUrls) {
+        if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+      }
+      objectUrls.length = 0;
+    };
+
     try {
       document.getElementById("doc-print-sheet")?.remove();
       const printSheet = document.createElement("div");
@@ -400,6 +408,7 @@ export class ExportPrintModalView {
         const pageInfo = doc.pages[pageIndex];
         const targetWidth = computePrintTargetWidth(pageInfo?.width ?? 612, printDpi);
         const dataUrl = await Backend.renderPage(pageIndex, targetWidth);
+        objectUrls.push(dataUrl);
 
         const pageWrap = document.createElement("div");
         pageWrap.className = "doc-print-page";
@@ -416,6 +425,7 @@ export class ExportPrintModalView {
 
       const cleanup = () => {
         printSheet.remove();
+        revokeAll();
         window.removeEventListener("afterprint", cleanup);
       };
       window.addEventListener("afterprint", cleanup, { once: true });
@@ -424,6 +434,7 @@ export class ExportPrintModalView {
       this.close();
       window.print();
     } catch (err) {
+      revokeAll();
       document.getElementById("doc-print-sheet")?.remove();
       this.setError(String(err));
       toast.show({ message: `Print preparation failed: ${String(err)}`, type: "error" });
