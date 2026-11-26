@@ -122,6 +122,91 @@ dialog.doc-modal::backdrop {
   box-shadow: var(--shadow-sm);
 }
 
+.doc-modal-tabs.has-sliding-indicator .doc-modal-tab[aria-selected="true"] {
+  background: transparent;
+  box-shadow: none;
+}
+
+.wm-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 230px;
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .wm-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.wm-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.wm-preview-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--workspace, var(--muted));
+}
+
+.wm-preview-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 250px;
+}
+
+.wm-preview-page {
+  position: relative;
+  width: 100%;
+  max-width: 196px;
+  aspect-ratio: 612 / 792;
+  background: #ffffff;
+  border-radius: 3px;
+  box-shadow: var(--shadow-md);
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  overflow: hidden;
+  user-select: none;
+}
+
+.wm-preview-skeleton {
+  position: absolute;
+  inset: 14% 12%;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  pointer-events: none;
+  opacity: 0.22;
+}
+
+.wm-preview-skeleton-line {
+  height: 4px;
+  border-radius: 2px;
+  background: #64748b;
+}
+
+.wm-preview-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-family: Helvetica, Arial, sans-serif;
+}
+
+.wm-preview-item {
+  position: absolute;
+  line-height: 1.1;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
 .doc-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

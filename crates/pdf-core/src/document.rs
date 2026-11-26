@@ -156,7 +156,64 @@ impl DocumentState {
             rotation,
             media_box,
             crop_box,
+            label: None,
         })
+    }
+
+    /// Computes logical page labels from the catalog's `/PageLabels` number tree (PDF 1.7 §12.4.2).
+    pub fn get_page_labels(&self) -> Vec<Option<String>> {
+        let count = self.page_count();
+        if count == 0 {
+            return Vec::new();
+        }
+        let Ok(root_ref) = self.doc.trailer.get(b"Root").and_then(|o| o.as_reference()) else {
+            return vec![None; count];
+        };
+        let Ok(catalog) = self.doc.get_dictionary(root_ref) else {
+            return vec![None; count];
+        };
+        let Ok(labels_obj) = catalog.get_deref(b"PageLabels", &self.doc) else {
+            return vec![None; count];
+        };
+        let Ok(labels_dict) = labels_obj.as_dict() else {
+            return vec![None; count];
+        };
+
+        let mut ranges: Vec<(usize, PageLabelRange)> = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        collect_page_label_ranges(&self.doc, labels_dict, &mut ranges, &mut visited);
+        if ranges.is_empty() {
+            return vec![None; count];
+        }
+        ranges.sort_by_key(|(start, _)| *start);
+
+        let mut out = Vec::with_capacity(count);
+        for page_idx in 0..count {
+            let entry = ranges.iter().rfind(|(start, _)| *start <= page_idx);
+            let label = entry.and_then(|(start_idx, range)| {
+                let offset = (page_idx - *start_idx) as i64;
+                let num = range.start.saturating_add(offset);
+                let num_part = match range.style {
+                    Some(PageLabelStyle::Decimal) => Some(num.to_string()),
+                    Some(PageLabelStyle::UpperRoman) => to_roman(num).map(|s| s.to_uppercase()),
+                    Some(PageLabelStyle::LowerRoman) => to_roman(num),
+                    Some(PageLabelStyle::UpperAlpha) => to_alpha(num, true),
+                    Some(PageLabelStyle::LowerAlpha) => to_alpha(num, false),
+                    None => None,
+                };
+                let combined = match num_part {
+                    Some(n) => format!("{}{}", range.prefix, n),
+                    None => range.prefix.clone(),
+                };
+                if combined.is_empty() {
+                    None
+                } else {
+                    Some(combined)
+                }
+            });
+            out.push(label);
+        }
+        out
     }
 
     pub fn get_metadata(&self, file_size_bytes: u64) -> DocumentMetadata {
@@ -246,6 +303,11 @@ impl DocumentState {
     /// Extracts the document's bookmark/outline hierarchy.
     pub fn get_outline(&self) -> Result<Vec<OutlineItem>, CoreError> {
         crate::outline::extract_outline(self)
+    }
+
+    /// Replaces the document's bookmark/outline hierarchy.
+    pub fn set_outline(&mut self, items: &[OutlineItem]) -> Result<(), CoreError> {
+        crate::outline::write_outline(self, items)
     }
 
     /// Merges all pages from external PDF files at `insert_at` (or appends when None).
@@ -688,5 +750,181 @@ fn deep_copy_object(
             Ok(Object::Stream(new_stream))
         }
         primitive => Ok(primitive.clone()),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageLabelStyle {
+    Decimal,
+    UpperRoman,
+    LowerRoman,
+    UpperAlpha,
+    LowerAlpha,
+}
+
+#[derive(Debug, Clone)]
+struct PageLabelRange {
+    style: Option<PageLabelStyle>,
+    prefix: String,
+    start: i64,
+}
+
+fn collect_page_label_ranges(
+    doc: &Document,
+    node: &Dictionary,
+    out: &mut Vec<(usize, PageLabelRange)>,
+    visited: &mut std::collections::HashSet<ObjectId>,
+) {
+    if let Ok(nums_obj) = node.get_deref(b"Nums", doc) {
+        if let Ok(nums) = nums_obj.as_array() {
+            for pair in nums.chunks_exact(2) {
+                let Ok(page_idx) = pair[0].as_i64() else {
+                    continue;
+                };
+                if page_idx < 0 {
+                    continue;
+                }
+                let dict_obj = match &pair[1] {
+                    Object::Reference(id) => doc.get_object(*id).ok(),
+                    other => Some(other),
+                };
+                let Some(Ok(label_dict)) = dict_obj.map(|o| o.as_dict()) else {
+                    continue;
+                };
+                let style = label_dict
+                    .get_deref(b"S", doc)
+                    .ok()
+                    .and_then(|o| o.as_name().ok())
+                    .and_then(|name| match name {
+                        b"D" => Some(PageLabelStyle::Decimal),
+                        b"R" => Some(PageLabelStyle::UpperRoman),
+                        b"r" => Some(PageLabelStyle::LowerRoman),
+                        b"A" => Some(PageLabelStyle::UpperAlpha),
+                        b"a" => Some(PageLabelStyle::LowerAlpha),
+                        _ => None,
+                    });
+                let prefix = label_dict
+                    .get_deref(b"P", doc)
+                    .ok()
+                    .and_then(|o| match o {
+                        Object::String(bytes, _) => Some(decode_pdf_string(bytes)),
+                        _ => o.as_str().ok().map(decode_pdf_string),
+                    })
+                    .unwrap_or_default();
+                let start = label_dict
+                    .get_deref(b"St", doc)
+                    .ok()
+                    .and_then(|o| o.as_i64().ok())
+                    .filter(|&v| v >= 1)
+                    .unwrap_or(1);
+                out.push((
+                    page_idx as usize,
+                    PageLabelRange {
+                        style,
+                        prefix,
+                        start,
+                    },
+                ));
+            }
+        }
+    }
+
+    if let Ok(kids_obj) = node.get_deref(b"Kids", doc) {
+        if let Ok(kids) = kids_obj.as_array() {
+            for kid in kids {
+                if let Ok(kid_id) = kid.as_reference() {
+                    if !visited.insert(kid_id) {
+                        continue;
+                    }
+                    if let Ok(kid_dict) = doc.get_dictionary(kid_id) {
+                        collect_page_label_ranges(doc, kid_dict, out, visited);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn to_roman(num: i64) -> Option<String> {
+    if num <= 0 || num > 3999 {
+        return None;
+    }
+    const TABLE: &[(i64, &str)] = &[
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut n = num;
+    let mut res = String::new();
+    for &(val, sym) in TABLE {
+        while n >= val {
+            res.push_str(sym);
+            n -= val;
+        }
+    }
+    Some(res)
+}
+
+fn to_alpha(num: i64, uppercase: bool) -> Option<String> {
+    if num <= 0 {
+        return None;
+    }
+    let idx = (num - 1) as usize;
+    let letter_offset = (idx % 26) as u8;
+    let repeat = (idx / 26) + 1;
+    let base = if uppercase { b'A' } else { b'a' };
+    let ch = (base + letter_offset) as char;
+    Some(std::iter::repeat_n(ch, repeat).collect())
+}
+
+#[cfg(test)]
+mod page_label_tests {
+    use super::*;
+    use lopdf::dictionary;
+
+    #[test]
+    fn resolves_page_labels_roman_prefix_and_decimal() {
+        let mut state = DocumentState::new_blank(612.0, 792.0).unwrap();
+        for i in 1..6 {
+            state.insert_blank_page(i, 612.0, 792.0).unwrap();
+        }
+        let nums = vec![
+            Object::Integer(0),
+            Object::Dictionary(dictionary! { "S" => "r" }),
+            Object::Integer(2),
+            Object::Dictionary(dictionary! { "P" => Object::string_literal("A-"), "S" => "D", "St" => 1 }),
+            Object::Integer(4),
+            Object::Dictionary(dictionary! { "S" => "A", "St" => 1 }),
+        ];
+        let labels_id = state.doc.add_object(dictionary! { "Nums" => nums });
+        let root_id = state.doc.trailer.get(b"Root").unwrap().as_reference().unwrap();
+        state
+            .doc
+            .get_dictionary_mut(root_id)
+            .unwrap()
+            .set("PageLabels", labels_id);
+
+        let labels = state.get_page_labels();
+        assert_eq!(
+            labels,
+            vec![
+                Some("i".to_string()),
+                Some("ii".to_string()),
+                Some("A-1".to_string()),
+                Some("A-2".to_string()),
+                Some("A".to_string()),
+                Some("B".to_string()),
+            ]
+        );
     }
 }

@@ -2633,6 +2633,7 @@ dependencies = [
  "parking_lot",
  "pdfium-render",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

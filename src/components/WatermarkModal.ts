@@ -5,6 +5,7 @@ import { editorState } from "../state/editorState";
 import { createRangePreviewer, PageScopeMode, resolvePageSelection } from "./MergeSplitModal";
 import { toast } from "./Toast";
 import { icon } from "./ui/icon";
+import { animateDialogSize, bindEditableSliderValue, initSlidingTabs } from "./ui/modalMotion";
 import "../styles/doc-tools.css";
 
 export function formatBatesPreview(prefix: string, start: number, digits: number): string {
@@ -58,6 +59,9 @@ export class WatermarkModalView {
   private submitBtn: HTMLButtonElement;
 
   private activeKind: BatchOverlayKind = "watermark";
+  private slidingTabs: ReturnType<typeof initSlidingTabs>;
+  private previewPageEl: HTMLElement;
+  private previewOverlayEl: HTMLElement;
   private rangePreviewer: ReturnType<typeof createRangePreviewer>;
   private focusReturn: HTMLElement | null = null;
   private busy = false;
@@ -66,6 +70,7 @@ export class WatermarkModalView {
   constructor() {
     this.dialog = document.createElement("dialog");
     this.dialog.className = "doc-modal doc-modal--wide";
+    this.dialog.style.width = "min(820px, calc(100vw - 32px))";
     this.dialog.setAttribute("aria-labelledby", "wm-modal-title");
     this.dialog.innerHTML = `
       <div class="doc-modal-header">
@@ -84,6 +89,9 @@ export class WatermarkModalView {
           <button type="button" class="doc-modal-tab" role="tab" data-kind="header_footer" aria-selected="false">Header &amp; footer</button>
           <button type="button" class="doc-modal-tab" role="tab" data-kind="bates" aria-selected="false">Bates</button>
         </div>
+
+        <div class="wm-layout">
+          <div class="wm-controls">
 
         <section id="wm-sec-watermark" class="flex flex-col gap-3">
           <div class="doc-field">
@@ -226,6 +234,29 @@ export class WatermarkModalView {
         </div>
 
         <p class="doc-error" id="wm-error" role="alert" hidden></p>
+          </div>
+          <aside class="wm-preview-pane" aria-label="Live overlay preview">
+            <div class="flex items-center justify-between">
+              <span class="doc-label">Live preview</span>
+              <span class="doc-hint doc-tabular" id="wm-preview-page-num">Page 1</span>
+            </div>
+            <div class="wm-preview-stage">
+              <div class="wm-preview-page" id="wm-preview-page">
+                <div class="wm-preview-skeleton">
+                  <div class="wm-preview-skeleton-line" style="width:62%;height:6px;"></div>
+                  <div class="wm-preview-skeleton-line" style="width:94%;"></div>
+                  <div class="wm-preview-skeleton-line" style="width:88%;"></div>
+                  <div class="wm-preview-skeleton-line" style="width:76%;"></div>
+                  <div class="wm-preview-skeleton-line" style="width:92%;margin-top:8px;"></div>
+                  <div class="wm-preview-skeleton-line" style="width:85%;"></div>
+                  <div class="wm-preview-skeleton-line" style="width:90%;"></div>
+                  <div class="wm-preview-skeleton-line" style="width:68%;"></div>
+                </div>
+                <div class="wm-preview-overlay" id="wm-preview-overlay"></div>
+              </div>
+            </div>
+          </aside>
+        </div>
       </form>
       <div class="doc-modal-footer">
         <div class="doc-modal-footer-actions">
@@ -278,6 +309,9 @@ export class WatermarkModalView {
     this.rangeStatus = this.dialog.querySelector("#wm-range-status")!;
     this.errorEl = this.dialog.querySelector("#wm-error")!;
     this.submitBtn = this.dialog.querySelector("#wm-submit")!;
+    this.previewPageEl = this.dialog.querySelector("#wm-preview-page")!;
+    this.previewOverlayEl = this.dialog.querySelector("#wm-preview-overlay")!;
+    this.slidingTabs = initSlidingTabs(this.dialog.querySelector(".doc-modal-tabs")!, ".doc-modal-tab");
     this.rangePreviewer = createRangePreviewer(this.rangeStatus);
 
     this.bindEvents();
@@ -318,6 +352,7 @@ export class WatermarkModalView {
       btn.addEventListener("click", () => {
         this.wmTextInput.value = btn.dataset.wmPreset ?? "";
         this.setError(null);
+        this.renderPreview();
       });
     });
 
@@ -325,21 +360,37 @@ export class WatermarkModalView {
       btn.addEventListener("click", () => {
         this.pnTemplateInput.value = btn.dataset.pnPreset ?? "";
         this.setError(null);
+        this.renderPreview();
       });
     });
 
     this.wmRotationInput.addEventListener("input", () => {
       this.wmRotationVal.textContent = `${this.wmRotationInput.value}°`;
+      this.renderPreview();
+    });
+    bindEditableSliderValue(this.wmRotationVal, this.wmRotationInput, {
+      unit: "°",
+      onCommit: () => this.renderPreview(),
     });
 
     this.opacityInput.addEventListener("input", () => {
       this.opacityVal.textContent = `${Math.round(Number(this.opacityInput.value) * 100)}%`;
+      this.renderPreview();
+    });
+    bindEditableSliderValue(this.opacityVal, this.opacityInput, {
+      scale: 100,
+      unit: "%",
+      onCommit: () => this.renderPreview(),
     });
 
     this.colorInput.addEventListener("input", () => {
       const label = this.dialog.querySelector("#wm-color-label");
       if (label) label.textContent = this.colorInput.value;
+      this.renderPreview();
     });
+
+    this.form.addEventListener("input", () => this.renderPreview());
+    this.form.addEventListener("change", () => this.renderPreview());
 
     const updateBates = () => {
       this.batesPreviewEl.textContent = formatBatesPreview(
@@ -416,18 +467,23 @@ export class WatermarkModalView {
 
   private switchKind(kind: BatchOverlayKind) {
     this.activeKind = kind;
-    for (const btn of this.kindButtons) {
-      btn.setAttribute("aria-selected", String(btn.dataset.kind === kind));
-    }
+    const apply = () => {
+      for (const btn of this.kindButtons) {
+        btn.setAttribute("aria-selected", String(btn.dataset.kind === kind));
+      }
 
-    this.watermarkSection.hidden = kind !== "watermark";
-    this.pageNumbersSection.hidden = kind !== "page_numbers";
-    this.headerFooterSection.hidden = kind !== "header_footer";
-    this.batesSection.hidden = kind !== "bates";
+      this.watermarkSection.hidden = kind !== "watermark";
+      this.pageNumbersSection.hidden = kind !== "page_numbers";
+      this.headerFooterSection.hidden = kind !== "header_footer";
+      this.batesSection.hidden = kind !== "bates";
 
-    this.positionField.hidden = kind === "header_footer";
-    this.rotationField.hidden = kind !== "watermark";
-    this.marginField.hidden = kind === "watermark";
+      this.positionField.hidden = kind === "header_footer";
+      this.rotationField.hidden = kind !== "watermark";
+      this.marginField.hidden = kind === "watermark";
+    };
+    if (this.dialog.open) animateDialogSize(this.dialog, apply);
+    else apply();
+    this.slidingTabs.update(!this.dialog.open);
 
     if (kind === "watermark") {
       this.positionSelect.value = "center";
@@ -456,6 +512,90 @@ export class WatermarkModalView {
     const colorLabel = this.dialog.querySelector("#wm-color-label");
     if (colorLabel) colorLabel.textContent = this.colorInput.value;
     this.setError(null);
+    this.renderPreview();
+  }
+
+  private renderPreview() {
+    const doc = editorState.doc;
+    const pageIdx = editorState.currentPage;
+    const page = doc?.pages[pageIdx];
+    const pageW = page?.width ?? 612;
+    const pageH = page?.height ?? 792;
+    const total = doc?.page_count ?? 1;
+    const pageNumEl = this.dialog.querySelector("#wm-preview-page-num");
+    if (pageNumEl) pageNumEl.textContent = `Page ${pageIdx + 1}`;
+    this.previewPageEl.style.aspectRatio = `${pageW} / ${pageH}`;
+
+    const scale = 196 / pageW;
+    const fontSizePt = Math.max(6, Number(this.fontSizeInput.value) || 12);
+    const fontPx = Math.max(4, fontSizePt * scale);
+    const color = this.colorInput.value || "#252524";
+    const opacity = Math.max(0.05, Math.min(1, Number(this.opacityInput.value) || 1));
+    const marginPx = Math.max(4, (Number(this.marginInput.value) || 28) * scale);
+    const pos = this.positionSelect.value as BatchOverlayPosition;
+    const rot = this.activeKind === "watermark" ? Number(this.wmRotationInput.value) || 0 : 0;
+
+    const subst = (tpl: string) =>
+      tpl.replace(/\{page\}/g, String(pageIdx + 1)).replace(/\{total\}/g, String(total));
+
+    const makeItem = (text: string, slotPos: BatchOverlayPosition, rotationDeg = 0) => {
+      const el = document.createElement("span");
+      el.className = "wm-preview-item";
+      el.textContent = text;
+      el.style.fontSize = `${fontPx}px`;
+      el.style.color = color;
+      el.style.opacity = String(opacity);
+
+      let tx = "0%";
+      let ty = "0%";
+      if (slotPos === "center") {
+        el.style.left = "50%";
+        el.style.top = "50%";
+        tx = "-50%";
+        ty = "-50%";
+      } else {
+        if (slotPos.startsWith("top_")) el.style.top = `${marginPx}px`;
+        else el.style.bottom = `${marginPx}px`;
+
+        if (slotPos.endsWith("_left")) el.style.left = `${marginPx}px`;
+        else if (slotPos.endsWith("_right")) el.style.right = `${marginPx}px`;
+        else {
+          el.style.left = "50%";
+          tx = "-50%";
+        }
+      }
+      el.style.transform = `translate(${tx}, ${ty}) rotate(${-rotationDeg}deg)`;
+      return el;
+    };
+
+    const items: HTMLElement[] = [];
+    if (this.activeKind === "watermark") {
+      const text = this.wmTextInput.value.trim() || "WATERMARK";
+      items.push(makeItem(text, pos, rot));
+    } else if (this.activeKind === "page_numbers") {
+      const tpl = this.pnTemplateInput.value.trim() || "Page {page} of {total}";
+      items.push(makeItem(subst(tpl), pos));
+    } else if (this.activeKind === "bates") {
+      const bates = formatBatesPreview(
+        this.batesPrefixInput.value,
+        Number(this.batesStartInput.value),
+        Number(this.batesDigitsInput.value),
+      );
+      items.push(makeItem(bates, pos));
+    } else {
+      const slots: Array<[string, BatchOverlayPosition]> = [
+        [this.hfHeaderLeft.value.trim(), "top_left"],
+        [this.hfHeaderCenter.value.trim(), "top_center"],
+        [this.hfHeaderRight.value.trim(), "top_right"],
+        [this.hfFooterLeft.value.trim(), "bottom_left"],
+        [this.hfFooterCenter.value.trim(), "bottom_center"],
+        [this.hfFooterRight.value.trim(), "bottom_right"],
+      ];
+      for (const [val, slot] of slots) {
+        if (val) items.push(makeItem(subst(val), slot));
+      }
+    }
+    this.previewOverlayEl.replaceChildren(...items);
   }
 
   private setError(message: string | null) {

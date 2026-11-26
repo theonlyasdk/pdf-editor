@@ -2,6 +2,27 @@
 
 A fast, calm, professional desktop PDF editor built with **Tauri v2**, **Rust**, and **shadcn/ui with Tailwind CSS**. Designed from the ground up for privacy, performance, and true PDF specification compliance.
 
+![PDF Editor Desktop View](docs/screenshots/01_hero_editor_light.png)
+
+---
+
+## Visual Tour
+
+| Light Theme Workspace | Dark Theme Workspace |
+| :---: | :---: |
+| ![Light Mode Overview](docs/screenshots/01_hero_editor_light.png) | ![Dark Mode Overview](docs/screenshots/02_editor_dark_mode.png) |
+| *Continuous reading mode with thumbnail rail and page navigation* | *OLED-friendly dark theme with full tool palette* |
+
+| Multi-Page Grid Overview | Non-Destructive Crop & Redact |
+| :---: | :---: |
+| ![Grid Overview](docs/screenshots/03_grid_overview.png) | ![Crop Mode](docs/screenshots/04_crop_mode.png) |
+| *Bird's-eye grid view with live annotation overlays* | *Interactive crop box with draggable handles and geometry HUD* |
+
+| Searchable Command Palette (`Ctrl+K`) | Clean Onboarding & Dropzone |
+| :---: | :---: |
+| ![Command Palette](docs/screenshots/05_command_palette.png) | ![Empty State](docs/screenshots/06_empty_state.png) |
+| *Instant fuzzy search across all application actions* | *Distraction-free welcome state with recent document history* |
+
 ---
 
 ## Key Features
@@ -60,6 +81,43 @@ The project is structured cleanly as a Cargo workspace:
 - **Rust**: 1.80+ (tested on Rust 1.99.1)
 - **Node.js**: v20+ (tested on Node v26.13.0, npm 11.20.0)
 - **Platform**: Windows, macOS, or Linux
+
+---
+
+## Tested Hardware & Platform Specifications
+
+All performance benchmarks, automated suites, and manual UI verifications were executed under the following hardware and environment conditions:
+
+| Parameter | Specification |
+| :--- | :--- |
+| **Operating System / Platform** | Microsoft Windows 11 Pro 64-bit (Build 26300) |
+| **Processor (CPU)** | AMD Ryzen 5 5600X 6-Core Processor (6 Cores, 12 Threads @ 3.7 GHz base, 4.6 GHz boost) |
+| **Graphics (GPU)** | NVIDIA GeForce RTX 5060 (Hardware-accelerated DirectComposition & WebView2 compositor) |
+| **System Memory (RAM)** | 16 GB DDR4 |
+| **Rust Toolchain** | Rust 1.99.1 (`rustc 1.99.1 58cf8f9c3`, `cargo 1.99.1 5f94df478`) |
+| **JavaScript Runtime & Package Manager** | Node.js v26.13.0, npm 11.20.0 |
+| **Bundled PDF Engine** | PDFium 160.0.8165.0 (Chromium release) |
+| **App Framework** | Tauri v2.12.5 (`@tauri-apps/api`, `tauri-plugin-dialog`, `tauri-plugin-fs`) |
+
+---
+
+## Test Conditions & Verification Summary
+
+The test harness evaluates the desktop application across rigorous synthetic, edge-case, and large-document workloads:
+
+- **Test Conditions**:
+  - **Clean State**: Cold launches tested both with empty document states and persistent `localStorage` session restores.
+  - **500-Page Stress Fixture**: Synthetic 500-page document (`large_500pages.pdf`) evaluated under continuous scrolling, multi-scale LRU tile rendering, and asynchronous background worker queues.
+  - **Affine & Rotation Edge Cases**: Documents containing mixed page dimensions (US Letter, A4, Landscape) and rotations (0°, 90°, 180°, 270°).
+  - **Cryptographic & Redaction Safety**: Decompresses content streams, excises text glyph operators (`Tj`, `TJ`), scrubs physical byte occurrences, and verifies byte-level absence from serialized outputs.
+  - **Fail-Safe Atomic Saves**: Writes to `.tmp` files, verifies reopening page counts, creates optional `.bak` backups, and executes atomic file replaces.
+- **Verification Results**:
+  - **Pure Rust Unit Tests (`pdf-core`)**: 15 passed, 0 failed.
+  - **Frontend Unit Tests (Vitest)**: 44 passed, 0 failed.
+  - **Linter & Compiler Checks**: 0 Clippy warnings (`cargo clippy --workspace --all-targets`), 0 TypeScript / compiler errors.
+  - **500-Page Document Parsing**: **6.47 ms** (Budget: < 500 ms).
+  - **First-Page Rasterization (HiDPI 1200 DPI)**: **100.67 ms** (Budget: < 1000 ms).
+  - **Undo / Redo Latency**: **0.18 ms** per inverted command transaction.
 
 ---
 

@@ -44,7 +44,12 @@ let openMenuTrigger: HTMLElement | null = null;
 
 export function showContextMenu(event: MouseEvent, title: string, actions: MenuAction[]) {
   event.preventDefault();
-  const trigger = event.type === "mousedown" && event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  const anchorEl =
+    event.currentTarget instanceof HTMLElement
+      ? event.currentTarget
+      : ((event.target as Element | null)?.closest?.("button, [aria-haspopup]") as HTMLElement | null) ??
+        (event.target as Element);
+  const trigger = event.type !== "contextmenu" && anchorEl instanceof HTMLElement ? anchorEl : null;
   if (trigger && openMenuTrigger === trigger && closeOpenMenu) {
     closeOpenMenu(true);
     return;
@@ -107,10 +112,13 @@ export function showContextMenu(event: MouseEvent, title: string, actions: MenuA
   }
 
   document.body.appendChild(menu);
-  const source = (event.target as Element).getBoundingClientRect();
-  const keyboard = event.clientX === 0 && event.clientY === 0;
-  menu.style.left = `${Math.max(8, Math.min(keyboard ? source.left : event.clientX, innerWidth - menu.offsetWidth - 8))}px`;
-  menu.style.top = `${Math.max(8, Math.min(keyboard ? source.bottom : event.clientY, innerHeight - menu.offsetHeight - 8))}px`;
+  const source = anchorEl.getBoundingClientRect();
+  const anchorToButton = event.type !== "contextmenu" || (event.clientX === 0 && event.clientY === 0);
+  const rawLeft = anchorToButton ? source.left : event.clientX;
+  const fitsBelow = source.bottom + 4 + menu.offsetHeight <= innerHeight - 8;
+  const rawTop = anchorToButton ? (fitsBelow ? source.bottom + 4 : source.top - menu.offsetHeight - 4) : event.clientY;
+  menu.style.left = `${Math.max(8, Math.min(rawLeft, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(rawTop, innerHeight - menu.offsetHeight - 8))}px`;
   const buttons = [...menu.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
   buttons[0]?.focus();
   menu.addEventListener("keydown", (key) => {

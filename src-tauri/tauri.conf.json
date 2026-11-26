@@ -33,6 +33,15 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "fileAssociations": [
+      {
+        "ext": ["pdf"],
+        "name": "PDF Document",
+        "description": "Portable Document Format",
+        "mimeType": "application/pdf",
+        "role": "Editor"
+      }
+    ],
     "resources": {
       "../bin/pdfium.dll": "bin/pdfium.dll",
       "../bin/pdfium-notices/": "bin/pdfium-notices/",

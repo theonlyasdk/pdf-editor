@@ -1,10 +1,17 @@
-import { Backend } from "../../ipc/backend";
+import { Backend, isRenderCancelledError } from "../../ipc/backend";
 
 export type RasterTarget = HTMLCanvasElement | HTMLImageElement;
+
+export interface PageGeometry {
+  inViewport: boolean;
+  inMargin: boolean;
+  dist: number;
+}
 
 export interface PageRasterQueueOptions {
   isPriorityPage?: (page: number) => boolean;
   shouldPreloadAll?: () => boolean;
+  getPageGeometry?: (page: number, frame: HTMLElement) => PageGeometry | null;
 }
 
 interface PageJob {
@@ -16,6 +23,8 @@ interface PageJob {
 }
 
 export class PageRasterQueue {
+  private static nextQueueId = 1;
+  private readonly queueId = PageRasterQueue.nextQueueId++;
   private jobs = new Map<Element, PageJob>();
   private activeWorkers = 0;
   private activePriorityWorkers = 0;
@@ -25,6 +34,7 @@ export class PageRasterQueue {
   private observer: IntersectionObserver;
   private root: HTMLElement;
   private options: PageRasterQueueOptions;
+  private generation = 0;
 
   constructor(root: HTMLElement, maxConcurrency = 4, options: PageRasterQueueOptions = {}) {
     this.root = root;
@@ -46,9 +56,14 @@ export class PageRasterQueue {
   }
 
   reset() {
+    this.generation++;
     this.observer.disconnect();
     this.jobs.clear();
     this.latest = new WeakMap();
+  }
+
+  bumpGeneration(): number {
+    return ++this.generation;
   }
 
   triggerDrain() {
@@ -84,20 +99,28 @@ export class PageRasterQueue {
     const previous = this.latest.get(frame);
     if (frame.dataset.raster !== "ready") frame.dataset.raster = "loading";
 
-    const rootRect = this.root.getBoundingClientRect();
-    const frameRect = frame.getBoundingClientRect();
-    const margin = 200;
-    const inMargin =
-      rootRect.height > 0 &&
-      rootRect.width > 0 &&
-      frameRect.width > 0 &&
-      frameRect.height > 0 &&
-      frameRect.bottom >= rootRect.top - margin &&
-      frameRect.top <= rootRect.bottom + margin &&
-      frameRect.right >= rootRect.left - margin &&
-      frameRect.left <= rootRect.right + margin;
+    const isPriority = Boolean(this.options.isPriorityPage?.(page));
+    let visible = Boolean(previous?.visible || isPriority);
+    if (!visible) {
+      const geom = this.options.getPageGeometry?.(page, frame);
+      if (geom) {
+        visible = geom.inMargin;
+      } else {
+        const rootRect = this.root.getBoundingClientRect();
+        const frameRect = frame.getBoundingClientRect();
+        const margin = 200;
+        visible =
+          rootRect.height > 0 &&
+          rootRect.width > 0 &&
+          frameRect.width > 0 &&
+          frameRect.height > 0 &&
+          frameRect.bottom >= rootRect.top - margin &&
+          frameRect.top <= rootRect.bottom + margin &&
+          frameRect.right >= rootRect.left - margin &&
+          frameRect.left <= rootRect.right + margin;
+      }
+    }
 
-    const visible = Boolean(previous?.visible || inMargin || this.options.isPriorityPage?.(page));
     const job: PageJob = {
       frame,
       target,
@@ -108,19 +131,21 @@ export class PageRasterQueue {
     this.latest.set(frame, job);
     this.jobs.set(frame, job);
     frame.querySelector(".page-raster-retry")?.remove();
-    this.observer.unobserve(frame);
-    this.observer.observe(frame);
+    if (!previous) {
+      this.observer.observe(frame);
+    }
     if (visible || this.options.shouldPreloadAll?.()) {
       this.drain();
     }
   }
 
   private pickNextJob(): { job: PageJob; isPriority: boolean } | undefined {
-    const rootRect = this.root.getBoundingClientRect();
-    const centerX = (rootRect.left + rootRect.right) / 2;
-    const centerY = (rootRect.top + rootRect.bottom) / 2;
+    const getGeom = this.options.getPageGeometry;
+    const rootRect = getGeom ? null : this.root.getBoundingClientRect();
+    const centerX = rootRect ? (rootRect.left + rootRect.right) / 2 : 0;
+    const centerY = rootRect ? (rootRect.top + rootRect.bottom) / 2 : 0;
     const preloadAll = Boolean(this.options.shouldPreloadAll?.());
-    const hasViewport = rootRect.height > 0 && rootRect.width > 0;
+    const hasViewport = rootRect ? rootRect.height > 0 && rootRect.width > 0 : true;
 
     let best: PageJob | undefined;
     let bestTier = Infinity;
@@ -134,15 +159,29 @@ export class PageRasterQueue {
       }
 
       const isPriority = Boolean(this.options.isPriorityPage?.(job.page));
-      const r = job.frame.getBoundingClientRect();
-      const inViewport =
-        hasViewport &&
-        r.width > 0 &&
-        r.height > 0 &&
-        r.bottom >= rootRect.top &&
-        r.top <= rootRect.bottom &&
-        r.right >= rootRect.left &&
-        r.left <= rootRect.right;
+      let inViewport: boolean;
+      let dist: number;
+
+      const geom = getGeom?.(job.page, job.frame);
+      if (geom) {
+        inViewport = geom.inViewport;
+        dist = geom.dist;
+      } else {
+        const r = job.frame.getBoundingClientRect();
+        inViewport =
+          hasViewport &&
+          rootRect !== null &&
+          r.width > 0 &&
+          r.height > 0 &&
+          r.bottom >= rootRect.top &&
+          r.top <= rootRect.bottom &&
+          r.right >= rootRect.left &&
+          r.left <= rootRect.right;
+        dist =
+          r.width > 0 && r.height > 0
+            ? Math.hypot(r.left + r.width / 2 - centerX, r.top + r.height / 2 - centerY)
+            : job.page;
+      }
 
       let tier: number;
       if (isPriority) {
@@ -156,11 +195,6 @@ export class PageRasterQueue {
       } else {
         continue;
       }
-
-      const dist =
-        r.width > 0 && r.height > 0
-          ? Math.hypot(r.left + r.width / 2 - centerX, r.top + r.height / 2 - centerY)
-          : job.page;
 
       if (tier < bestTier || (tier === bestTier && dist < bestDist)) {
         best = job;
@@ -208,7 +242,10 @@ export class PageRasterQueue {
       if (!job.frame.isConnected || this.latest.get(job.frame) !== job) return;
 
       if (job.target instanceof HTMLCanvasElement) {
-        const buf = await Backend.renderPageRaw(job.page, job.width);
+        const buf = await Backend.renderPageRaw(job.page, job.width, {
+          generation: this.generation,
+          queueId: this.queueId,
+        });
         if (!job.frame.isConnected || this.latest.get(job.frame) !== job) return;
         const view = new DataView(buf);
         const w = view.getUint32(0, true);
@@ -242,6 +279,7 @@ export class PageRasterQueue {
       job.frame.dispatchEvent(new Event("page-raster-ready"));
     } catch (error) {
       if (!job.frame.isConnected || this.latest.get(job.frame) !== job) return;
+      if (isRenderCancelledError(error)) return;
       if (job.frame.dataset.raster !== "ready") job.frame.dataset.raster = "error";
       const retry = document.createElement("button");
       retry.type = "button";

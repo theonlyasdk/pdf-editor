@@ -146,7 +146,7 @@ export const STRINGS = {
     themeDark: "Dark",
     defaultViewMode: "Default view mode",
     defaultZoom: "Default zoom",
-    smoothZoom: "Enable smooth zooming",
+    smoothZoom: "Enable smooth zoom and scroll",
     animateViewTransitions: "Animate transitions between view modes",
     gridRadialFlyIn: "Radial fly-in effect when entering grid view",
     reopenLastPdf: "Re-open last opened PDF on startup",

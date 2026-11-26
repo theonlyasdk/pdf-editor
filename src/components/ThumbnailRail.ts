@@ -406,10 +406,11 @@ export class ThumbnailRailView {
       const isSelected = editorState.selectedPages.has(i);
       const isCurrent = editorState.currentPage === i;
 
+      const pageLabel = pageInfo.label || String(i + 1);
       const card = document.createElement("div");
       card.className = `thumbnail-card ${isSelected ? "selected" : ""} ${isCurrent ? "current" : ""}`;
       card.tabIndex = 0;
-      card.setAttribute("aria-label", `Page ${i + 1}`);
+      card.setAttribute("aria-label", pageInfo.label ? `Page ${pageInfo.label} (${i + 1})` : `Page ${i + 1}`);
       card.dataset.rasterKey = editorState.getPageRasterKey(i);
       if (isCurrent) card.setAttribute("aria-current", "page");
       card.addEventListener("contextmenu", (event) => showPageMenu(event, i));
@@ -425,7 +426,7 @@ export class ThumbnailRailView {
       const metaRow = document.createElement("div");
       metaRow.className = "flex justify-between w-full px-1";
       metaRow.innerHTML = `
-        <span class="thumbnail-label">${i + 1}</span>
+        <span class="thumbnail-label">${pageLabel}</span>
         <span class="thumbnail-detail">${[pageInfo.rotation ? `${pageInfo.rotation}°` : "", pageInfo.crop_box ? "Cropped" : ""].filter(Boolean).join(" · ")}</span>
       `;
       card.appendChild(metaRow);

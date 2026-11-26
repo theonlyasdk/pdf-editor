@@ -1,11 +1,13 @@
-import { showToolMenu } from "./EditorContextMenu";
+import { Copy, Highlighter, ShieldAlert, Strikethrough, Underline } from "lucide";
+import { jumpToPage, showToolMenu } from "./EditorContextMenu";
 import { buildAnnotation, drawingBox, drawingStyle, inkPointsToSvgPath, requestAnnotationText, smoothInkPoints, updateAnnotationRect, type AreaRedactItem, type DrawPoint } from "./drawing";
 import { computeFitZoom, formatUnitValue, resizeCrop } from "./cropGeometry";
 import { clearPendingPlacement, getPendingPlacement } from "./SignatureModal";
+import { icon } from "./ui/icon";
 import { PageRasterQueue } from "./ui/PageRasterQueue";
 import { Backend } from "../ipc/backend";
 import { editorState } from "../state/editorState";
-import { AnnotationDto, DocumentDto, PageBox, PageInfo, SearchResult, ToolType, ViewMode } from "../types/editor";
+import { AnnotationDto, DocumentDto, FormFieldDto, LinkDto, PageBox, PageInfo, SearchResult, TextSpanDto, ToolType, ViewMode } from "../types/editor";
 import { toast } from "./Toast";
 
 type ExtendedBackend = typeof Backend & {
@@ -65,6 +67,8 @@ export class CanvasViewportView {
   private gridZoomAnchor: { x: number; y: number } | null = null;
   private gridTargetAnchor: { x: number; y: number } | null = null;
   private gridSmoothZoomRaf = 0;
+  private gridSmoothScrollRaf = 0;
+  private gridScrollVel = { dx: 0, dy: 0 };
   private gridDrag: { pointer: number; x: number; y: number; moved: boolean; page?: number } | null = null;
   private fitZoomFrame = 0;
   private applyingFitZoom = false;
@@ -77,6 +81,15 @@ export class CanvasViewportView {
   private appliedGridColumns = 0;
   private appliedCacheAllPages = false;
   private isWheelZooming = false;
+  private wheelZoomRaf = 0;
+  private gridZoomingTimer = 0;
+  private pendingWheelZoomFactor = 1;
+  private pendingWheelAnchor: { x: number; y: number } | null = null;
+  private hydratedPages = new Set<number>();
+  private gridLayoutKey = "";
+  private gridRowBounds: Array<{ top: number; bottom: number; startIdx: number; endIdx: number }> = [];
+  private gridItemBounds: Array<{ left: number; top: number; right: number; bottom: number }> = [];
+  private lastGridFastState = "";
   private annotDrag: {
     pointer: number;
     svg: SVGSVGElement;
@@ -90,12 +103,29 @@ export class CanvasViewportView {
   } | null = null;
   private searchHighlightPage: number | null = null;
   private searchHighlightBoxes: PageBox[] = [];
+  private textSpansCache = new Map<string, TextSpanDto[]>();
+  private linksCache = new Map<string, LinkDto[]>();
+  private formFields: FormFieldDto[] = [];
+  private formFieldsVersionKey = "";
+  private formFieldsLoading = false;
+  private textSelectionPopover: HTMLElement;
+  private sessionScrollTimer = 0;
+
+  private scheduleSessionScrollSave() {
+    if (!editorState.doc?.file_path || editorState.pendingScrollRestore) return;
+    if (this.sessionScrollTimer) window.clearTimeout(this.sessionScrollTimer);
+    this.sessionScrollTimer = window.setTimeout(() => {
+      this.sessionScrollTimer = 0;
+      editorState.saveSessionScroll(this.element.scrollTop, this.element.scrollLeft);
+    }, 200);
+  }
 
   constructor(element: HTMLElement) {
     this.element = element;
     this.raster = new PageRasterQueue(element, 4, {
       isPriorityPage: (page) => page === editorState.currentPage,
       shouldPreloadAll: () => editorState.preferences.cacheAllPages,
+      getPageGeometry: (page) => (editorState.viewMode === "grid" ? this.computeGridPageGeometry(page) : null),
     });
     this.element.className = "canvas-viewport";
     this.element.tabIndex = 0;
@@ -103,6 +133,15 @@ export class CanvasViewportView {
     this.pagesContainer = document.createElement("div");
     this.pagesContainer.className = "canvas-pages-container";
     this.element.appendChild(this.pagesContainer);
+
+    this.textSelectionPopover = this.createTextSelectionPopover();
+    document.body.appendChild(this.textSelectionPopover);
+    document.addEventListener("selectionchange", () => this.scheduleTextSelectionPopover());
+    this.element.addEventListener("scroll", () => {
+      this.updateTextSelectionPopover();
+      this.scheduleSessionScrollSave();
+    }, { passive: true });
+    window.addEventListener("resize", () => this.updateTextSelectionPopover(), { passive: true });
 
     this.render();
     editorState.subscribe(() => this.render());
@@ -162,13 +201,24 @@ export class CanvasViewportView {
   private render() {
     if (!editorState.doc) {
       this.cancelViewAnimations();
+      this.cancelWheelZoom();
       this.renderedViewMode = null;
       this.appliedPageTokens = [];
+      this.hydratedPages.clear();
+      this.gridLayoutKey = "";
+      this.gridRowBounds = [];
+      this.gridItemBounds = [];
+      this.lastGridFastState = "";
       this.clearPersistentCache();
       this.cacheDocVersion = -1;
       this.cancelZoomRaster();
       this.searchHighlightPage = null;
       this.searchHighlightBoxes = [];
+      this.textSpansCache.clear();
+      this.linksCache.clear();
+      this.formFields = [];
+      this.formFieldsVersionKey = "";
+      this.hideTextSelectionPopover();
       this.raster.reset();
       this.pagesContainer.replaceChildren();
       this.element.style.display = "none";
@@ -176,6 +226,12 @@ export class CanvasViewportView {
     }
     this.element.style.display = "flex";
     this.element.dataset.tool = editorState.activeTool;
+    this.element.dataset.hideLinks = editorState.preferences.showLinks === false ? "1" : "0";
+    this.element.dataset.hideForms = editorState.preferences.showForms === false ? "1" : "0";
+    if (editorState.activeTool !== "select" || editorState.viewMode === "grid" || this.renderedViewMode !== editorState.viewMode) {
+      window.getSelection()?.removeAllRanges();
+      this.hideTextSelectionPopover();
+    }
     if (editorState.activeTool !== "stamp" && getPendingPlacement()) {
       clearPendingPlacement();
     }
@@ -201,22 +257,31 @@ export class CanvasViewportView {
     this.element.classList.toggle("grid-viewport", mode === "grid");
     if (mode !== "grid") {
       this.cancelGridSmoothZoom();
+      this.cancelWheelZoom();
+      this.pagesContainer.classList.remove("grid-zooming");
       this.gridZoom = null;
       this.appliedGridRasterZoom = 0;
       this.appliedGridColumns = 0;
+      this.gridLayoutKey = "";
+      this.lastGridFastState = "";
       this.pagesContainer.style.transform = "";
       this.pagesContainer.style.removeProperty("--grid-columns");
     } else {
       if (this.element.scrollLeft !== 0) this.element.scrollLeft = 0;
       if (this.element.scrollTop !== 0) this.element.scrollTop = 0;
       const cols = Math.max(1, Math.min(doc.page_count, editorState.preferences.gridColumns || 4));
-      this.pagesContainer.style.setProperty("--grid-columns", String(cols));
-      if (this.appliedGridColumns !== 0 && this.appliedGridColumns !== cols) {
-        this.gridZoom = null;
+      if (this.appliedGridColumns !== cols) {
+        this.pagesContainer.style.setProperty("--grid-columns", String(cols));
+        if (this.appliedGridColumns !== 0) {
+          this.gridZoom = null;
+        }
+        this.appliedGridColumns = cols;
+        this.gridLayoutKey = "";
       }
-      this.appliedGridColumns = cols;
     }
     const pageZoom = mode === "grid" ? 0.32 : zoom;
+    this.pagesContainer.style.setProperty("--page-zoom", String(pageZoom));
+    this.syncFormFieldsForDocument();
     const cacheAllChanged = this.appliedCacheAllPages !== editorState.preferences.cacheAllPages;
     this.appliedCacheAllPages = editorState.preferences.cacheAllPages;
     if (this.cacheDocVersion !== editorState.documentVersion || !this.appliedCacheAllPages) {
@@ -242,23 +307,24 @@ export class CanvasViewportView {
     }
     const heroPage = editorState.currentPage;
 
-    // Decide which pages to display based on view mode
-    let pagesToRender: number[] = [];
+    // Decide which pages to display based on view mode (avoid O(N) array allocation on every render)
+    let firstPageIndex = 0;
+    let pageRenderCount = doc.page_count;
     if (mode === "single") {
-      pagesToRender = [heroPage];
+      firstPageIndex = heroPage;
+      pageRenderCount = doc.page_count > 0 ? 1 : 0;
     } else if (mode === "spread") {
       const p = heroPage;
       if (p % 2 === 0) {
-        pagesToRender = [p, p + 1].filter((idx) => idx < doc.page_count);
+        firstPageIndex = p;
+        pageRenderCount = p + 1 < doc.page_count ? 2 : p < doc.page_count ? 1 : 0;
       } else {
-        pagesToRender = [p - 1, p].filter((idx) => idx >= 0);
+        firstPageIndex = p - 1;
+        pageRenderCount = p - 1 >= 0 ? 2 : 1;
       }
-    } else {
-      // continuous or grid: all pages
-      pagesToRender = Array.from({ length: doc.page_count }, (_, i) => i);
     }
 
-    const layout = `${editorState.documentVersion}:${mode}:${pagesToRender[0]}:${pagesToRender.length}`;
+    const layout = `${editorState.documentVersion}:${mode}:${firstPageIndex}:${pageRenderCount}`;
     const rebuild = this.layout !== layout;
     const viewModeChanged = rebuild && willAnimateSwitch;
     let viewTransition: {
@@ -297,8 +363,11 @@ export class CanvasViewportView {
       this.cropOverlayPage = null;
       this.appliedGridRasterZoom = mode === "grid" ? zoom : 0;
       this.raster.reset();
+      this.hydratedPages.clear();
+      this.gridLayoutKey = "";
       const pages = document.createDocumentFragment();
-      for (const index of pagesToRender) {
+      for (let offset = 0; offset < pageRenderCount; offset++) {
+        const index = firstPageIndex + offset;
         pages.appendChild(this.createPageShell(index, doc.pages[index], pageZoom));
       }
       this.pagesContainer.replaceChildren(pages);
@@ -405,14 +474,32 @@ export class CanvasViewportView {
       this.raster.triggerDrain();
     }
     this.canvasZoomAnchor = null;
-    this.rasterVersion = editorState.rasterVersion;
-    this.appliedPageTokens = [...(doc.page_revisions ?? [])];
-    if (mode === "grid") {
+    if (mode === "grid" && !rebuild && this.rasterVersion === editorState.rasterVersion && !cacheAllChanged) {
       this.updateGridZoom(zoom);
       if (this.appliedGridRasterZoom !== zoom) {
         this.appliedGridRasterZoom = zoom;
         if (!this.gridSmoothZoomRaf) {
-          this.scheduleZoomRaster(this.isWheelZooming ? 85 : 0);
+          this.scheduleZoomRaster(this.isWheelZooming ? 180 : 0);
+        }
+      }
+      if (!this.isWheelZooming && !this.gridSmoothZoomRaf) {
+        this.syncVirtualWindow(this.getRasterZoom());
+      }
+      const gridFastState = `${editorState.activeTool}:${editorState.activeTool === "crop" ? editorState.currentPage : ""}:${editorState.selectedAnnotationId ?? ""}:${editorState.cropRotation}:${editorState.toolSettings.cropRatioMode}:${editorState.cropBox ? `${editorState.cropBox.x},${editorState.cropBox.y},${editorState.cropBox.width},${editorState.cropBox.height}` : ""}:${extState.pendingRedactions?.length ?? 0}:${this.appliedGridColumns}`;
+      if (this.lastGridFastState === gridFastState) {
+        return;
+      }
+      this.lastGridFastState = gridFastState;
+    }
+
+    this.rasterVersion = editorState.rasterVersion;
+    this.appliedPageTokens = [...(doc.page_revisions ?? [])];
+    if (mode === "grid" && rebuild) {
+      this.updateGridZoom(zoom);
+      if (this.appliedGridRasterZoom !== zoom) {
+        this.appliedGridRasterZoom = zoom;
+        if (!this.gridSmoothZoomRaf) {
+          this.scheduleZoomRaster(this.isWheelZooming ? 180 : 0);
         }
       }
       if (!this.isWheelZooming && !this.gridSmoothZoomRaf) {
@@ -422,6 +509,15 @@ export class CanvasViewportView {
 
     if (viewTransition) {
       this.runViewHeroTransition(viewTransition);
+    }
+
+    if (rebuild && editorState.pendingScrollRestore) {
+      const target = editorState.pendingScrollRestore;
+      editorState.pendingScrollRestore = null;
+      requestAnimationFrame(() => {
+        this.element.scrollTop = target.scrollTop;
+        this.element.scrollLeft = target.scrollLeft;
+      });
     }
 
     const selected = editorState.activeTool === "select"
@@ -510,11 +606,26 @@ export class CanvasViewportView {
     canvas.setAttribute("aria-label", `Page ${pageIndex + 1}`);
     wrapper.appendChild(canvas);
 
+    const textLayer = document.createElement("div");
+    textLayer.className = "pdf-text-layer";
+    textLayer.dataset.pageIndex = String(pageIndex);
+    wrapper.appendChild(textLayer);
+
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("class", "pdf-annotation-layer");
     svg.setAttribute("viewBox", `0 0 ${pageInfo.width} ${pageInfo.height}`);
     svg.setAttribute("data-page-index", pageIndex.toString());
     wrapper.appendChild(svg);
+
+    const linkLayer = document.createElement("div");
+    linkLayer.className = "pdf-link-layer";
+    linkLayer.dataset.pageIndex = String(pageIndex);
+    wrapper.appendChild(linkLayer);
+
+    const formLayer = document.createElement("div");
+    formLayer.className = "pdf-form-layer";
+    formLayer.dataset.pageIndex = String(pageIndex);
+    wrapper.appendChild(formLayer);
 
     this.bindDrawingOnSvg(svg, pageIndex);
     wrapper.addEventListener("page-raster-ready", () => {
@@ -522,6 +633,7 @@ export class CanvasViewportView {
       this.cachePageBitmap(pageIndex, wrapper);
     });
     wrapper.dataset.hydrated = "1";
+    this.hydratedPages.add(pageIndex);
 
     const cached = editorState.preferences.cacheAllPages
       ? this.persistentPageCache.get(editorState.getPageRasterKey(pageIndex))
@@ -542,6 +654,7 @@ export class CanvasViewportView {
       const zoom = this.getRasterZoom();
       this.queuePageRaster(wrapper, pageInfo, zoom);
     }
+    void this.hydratePageOverlays(wrapper, pageIndex, pageInfo);
     return wrapper;
   }
 
@@ -583,6 +696,9 @@ export class CanvasViewportView {
     if (wrapper.dataset.hydrated !== "1") return;
     this.raster.evict(wrapper);
     delete wrapper.dataset.hydrated;
+    delete wrapper.dataset.rasterKey;
+    const idx = Number(wrapper.dataset.pageIndex);
+    if (Number.isFinite(idx)) this.hydratedPages.delete(idx);
     wrapper.replaceChildren();
   }
 
@@ -607,8 +723,14 @@ export class CanvasViewportView {
 
   private flushZoomRaster() {
     this.zoomRasterTimer = 0;
+    if (this.gridZoomingTimer) {
+      window.clearTimeout(this.gridZoomingTimer);
+      this.gridZoomingTimer = 0;
+    }
+    this.pagesContainer.classList.remove("grid-zooming");
     const doc = editorState.doc;
     if (!doc) return;
+    this.raster.bumpGeneration();
     const zoom = this.getRasterZoom();
     this.syncVirtualWindow(zoom);
     const cur = editorState.currentPage;
@@ -616,13 +738,24 @@ export class CanvasViewportView {
     if (curFrame && doc.pages[cur]) {
       this.queuePageRaster(curFrame, doc.pages[cur], zoom);
     }
-    for (const frame of this.pagesContainer.children) {
-      const pageFrame = frame as HTMLElement;
-      if (pageFrame.dataset.hydrated !== "1") continue;
-      const idx = Number(pageFrame.dataset.pageIndex);
-      if (idx === cur) continue;
-      const page = doc.pages[idx];
-      if (page) this.queuePageRaster(pageFrame, page, zoom);
+    if (editorState.viewMode === "grid" || editorState.viewMode === "continuous") {
+      for (const idx of this.hydratedPages) {
+        if (idx === cur) continue;
+        const pageFrame = this.pagesContainer.children[idx] as HTMLElement | undefined;
+        const page = doc.pages[idx];
+        if (pageFrame && page && pageFrame.dataset.hydrated === "1") {
+          this.queuePageRaster(pageFrame, page, zoom);
+        }
+      }
+    } else {
+      for (const frame of this.pagesContainer.children) {
+        const pageFrame = frame as HTMLElement;
+        if (pageFrame.dataset.hydrated !== "1") continue;
+        const idx = Number(pageFrame.dataset.pageIndex);
+        if (idx === cur) continue;
+        const page = doc.pages[idx];
+        if (page) this.queuePageRaster(pageFrame, page, zoom);
+      }
     }
   }
 
@@ -660,12 +793,38 @@ export class CanvasViewportView {
       return;
     }
 
-    const vp = this.element.getBoundingClientRect();
+    const vpW = this.element.clientWidth;
+    const vpH = this.element.clientHeight;
     let firstVis = 0;
     let lastVis = frames.length - 1;
 
-    if (vp.height > 0 && vp.width > 0) {
-      if (mode === "continuous") {
+    if (mode === "grid") {
+      const cols = this.appliedGridColumns || Math.max(1, Math.min(doc.page_count, editorState.preferences.gridColumns || 4));
+      this.ensureGridGeometry(doc, cols);
+      const scale = this.gridZoom ?? editorState.zoom;
+      if (vpH > 0 && vpW > 0 && scale > 0 && this.gridRowBounds.length > 0) {
+        const localTop = -this.gridOrigin.y / scale;
+        const localBottom = (vpH - this.gridOrigin.y) / scale;
+        let lo = 0;
+        let hi = this.gridRowBounds.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (this.gridRowBounds[mid].bottom < localTop) lo = mid + 1;
+          else hi = mid;
+        }
+        const firstRow = lo;
+        let lastRow = firstRow;
+        while (lastRow + 1 < this.gridRowBounds.length && this.gridRowBounds[lastRow + 1].top <= localBottom) {
+          lastRow++;
+        }
+        firstVis = this.gridRowBounds[firstRow].startIdx;
+        lastVis = this.gridRowBounds[lastRow].endIdx;
+      } else {
+        lastVis = Math.min(frames.length - 1, 11);
+      }
+    } else {
+      const vp = this.element.getBoundingClientRect();
+      if (vp.height > 0 && vp.width > 0) {
         let lo = 0;
         let hi = frames.length - 1;
         while (lo < hi) {
@@ -682,27 +841,13 @@ export class CanvasViewportView {
           lastVis++;
         }
       } else {
-        firstVis = frames.length;
-        lastVis = -1;
-        for (let i = 0; i < frames.length; i++) {
-          const r = frames[i].getBoundingClientRect();
-          if (r.right >= vp.left && r.left <= vp.right && r.bottom >= vp.top && r.top <= vp.bottom) {
-            if (i < firstVis) firstVis = i;
-            if (i > lastVis) lastVis = i;
-          }
-        }
-        if (lastVis < firstVis) {
-          firstVis = 0;
-          lastVis = Math.min(frames.length - 1, 11);
-        }
+        lastVis = Math.min(frames.length - 1, 4);
       }
-    } else {
-      lastVis = Math.min(frames.length - 1, mode === "grid" ? 11 : 4);
     }
 
     const effectiveZoom = editorState.zoom;
-    const hydrateBuf = mode === "grid" ? 12 : effectiveZoom > 1.35 ? 1 : effectiveZoom >= 0.75 ? 2 : 3;
-    const evictBuf = mode === "grid" ? 20 : effectiveZoom > 1.35 ? 2 : effectiveZoom >= 0.75 ? 4 : 6;
+    const hydrateBuf = mode === "grid" ? 8 : effectiveZoom > 1.35 ? 1 : effectiveZoom >= 0.75 ? 2 : 3;
+    const evictBuf = mode === "grid" ? 16 : effectiveZoom > 1.35 ? 2 : effectiveZoom >= 0.75 ? 4 : 6;
     const hydrateStart = Math.max(0, firstVis - hydrateBuf);
     const hydrateEnd = Math.min(frames.length - 1, lastVis + hydrateBuf);
     const evictStart = Math.max(0, firstVis - evictBuf);
@@ -731,29 +876,53 @@ export class CanvasViewportView {
     if (curFrame) {
       if (curFrame.dataset.hydrated !== "1") {
         this.ensurePageHydrated(editorState.currentPage, deferRaster);
-      } else if (zoomOverride !== undefined && !deferRaster) {
+      } else if ((zoomOverride !== undefined || curFrame.dataset.raster !== "ready") && !deferRaster) {
         const page = doc.pages[editorState.currentPage];
         if (page) this.queuePageRaster(curFrame, page, zoom);
       }
     }
 
-    for (let i = 0; i < frames.length; i++) {
-      const frame = frames[i] as HTMLElement;
-      const pageIdx = Number(frame.dataset.pageIndex);
-      if (pageIdx === editorState.currentPage) continue;
-      if ((i >= hydrateStart && i <= hydrateEnd) || pinned.has(pageIdx)) {
+    if (cacheAll) {
+      for (let i = 0; i < frames.length; i++) {
+        const frame = frames[i] as HTMLElement;
+        const pageIdx = Number(frame.dataset.pageIndex);
+        if (pageIdx === editorState.currentPage) continue;
+        if (frame.dataset.hydrated !== "1") {
+          this.ensurePageHydrated(pageIdx, deferRaster);
+        } else if ((zoomOverride !== undefined || frame.dataset.raster !== "ready") && !deferRaster && ((i >= hydrateStart && i <= hydrateEnd) || pinned.has(pageIdx))) {
+          const page = doc.pages[pageIdx];
+          if (page) this.queuePageRaster(frame, page, zoom);
+        }
+      }
+    } else {
+      for (let i = hydrateStart; i <= hydrateEnd; i++) {
+        const frame = frames[i] as HTMLElement;
+        const pageIdx = Number(frame.dataset.pageIndex);
+        if (pageIdx === editorState.currentPage) continue;
         if (frame.dataset.hydrated !== "1") {
           this.ensurePageHydrated(pageIdx, deferRaster);
         } else if (zoomOverride !== undefined && !deferRaster) {
           const page = doc.pages[pageIdx];
           if (page) this.queuePageRaster(frame, page, zoom);
         }
-      } else if (cacheAll) {
+      }
+      for (const pageIdx of pinned) {
+        if (pageIdx === editorState.currentPage) continue;
+        const frame = frames[pageIdx] as HTMLElement | undefined;
+        if (!frame) continue;
         if (frame.dataset.hydrated !== "1") {
           this.ensurePageHydrated(pageIdx, deferRaster);
+        } else if (zoomOverride !== undefined && !deferRaster) {
+          const page = doc.pages[pageIdx];
+          if (page) this.queuePageRaster(frame, page, zoom);
         }
-      } else if (i < evictStart || i > evictEnd) {
-        this.dehydratePage(frame);
+      }
+      for (const pageIdx of Array.from(this.hydratedPages)) {
+        if (pageIdx === editorState.currentPage || pinned.has(pageIdx)) continue;
+        if (pageIdx < evictStart || pageIdx > evictEnd) {
+          const frame = frames[pageIdx] as HTMLElement | undefined;
+          if (frame) this.dehydratePage(frame);
+        }
       }
     }
   }
@@ -774,16 +943,28 @@ export class CanvasViewportView {
         target.height = cached.canvas.height;
         target.getContext("2d", { alpha: false })?.drawImage(cached.canvas, 0, 0);
         frame.dataset.raster = "ready";
+        frame.dataset.rasterKey = key;
         frame.dataset.renderedPixels = String(cached.pixels);
       }
       if (cached.pixels >= pixels) {
         frame.dataset.request = request;
+        frame.dataset.rasterKey = key;
         return;
       }
     }
 
+    if (
+      frame.dataset.raster === "ready" &&
+      frame.dataset.rasterKey === key &&
+      Number(frame.dataset.renderedPixels) >= pixels
+    ) {
+      frame.dataset.request = request;
+      return;
+    }
+
     if (frame.dataset.request !== request) {
       frame.dataset.request = request;
+      frame.dataset.rasterKey = key;
       const target = frame.querySelector<HTMLCanvasElement>(".pdf-page-canvas");
       if (target) this.raster.add(frame, target, page.index, pixels);
     }
@@ -993,21 +1174,25 @@ export class CanvasViewportView {
     const cropRot = editorState.cropRotation;
     hud.innerHTML = `
       <div class="crop-hud-inner">
-        <span class="crop-hud-dims">${formatUnitValue(box.width, unit)} × ${formatUnitValue(box.height, unit)} ${unit}</span>
-        <span class="crop-hud-angle" id="crop-hud-angle" ${Math.abs(cropRot) < 0.05 ? "hidden" : ""}>${cropRot > 0 ? "+" : ""}${cropRot.toFixed(1)}°</span>
-        <span class="crop-hud-badge ${isLocked ? "locked" : ""}" id="crop-hud-ratio-tag">
-          ${isLocked ? `Fixed ratio (${(box.width / Math.max(1, box.height)).toFixed(2)})` : "Free Ratio (Hold Ctrl to Lock)"}
-        </span>
-        <div class="crop-hud-actions">
-          <button class="ui-button ui-button--sm ui-button--default py-0 px-2 font-medium" id="hud-crop-apply">Apply (Enter)</button>
-          <button class="ui-button ui-button--sm ui-button--outline py-0 px-2" id="hud-crop-cancel">Cancel (Esc)</button>
+        <div class="crop-hud-top">
+          <span class="crop-hud-badge ${isLocked ? "locked" : ""}" id="crop-hud-ratio-tag">
+            ${isLocked ? `Fixed ratio (${(box.width / Math.max(1, box.height)).toFixed(2)})` : "Free Ratio (Hold Ctrl to Lock)"}
+          </span>
+          <span class="crop-hud-angle" id="crop-hud-angle" ${Math.abs(cropRot) < 0.05 ? "hidden" : ""}>${cropRot > 0 ? "+" : ""}${cropRot.toFixed(1)}°</span>
+        </div>
+        <div class="crop-hud-bottom">
+          <span class="crop-hud-dims">${formatUnitValue(box.width, unit)} × ${formatUnitValue(box.height, unit)} ${unit}</span>
+          <div class="crop-hud-actions">
+            <button class="ui-button ui-button--sm ui-button--default py-0 px-2 font-medium" id="hud-crop-apply">Apply (Enter)</button>
+            <button class="ui-button ui-button--sm ui-button--outline py-0 px-2" id="hud-crop-cancel">Cancel (Esc)</button>
+          </div>
         </div>
       </div>
     `;
 
     hud.querySelector("#hud-crop-apply")?.addEventListener("click", () => this.applyActiveCrop());
     hud.querySelector("#hud-crop-cancel")?.addEventListener("click", () => this.cancelActiveCrop());
-    hud.addEventListener("pointerenter", () => {
+    hud.querySelector(".crop-hud-top")?.addEventListener("pointerenter", () => {
       if (this.cropDrag) return;
       this.cropHudDodged = !this.cropHudDodged;
       this.positionCropHud(hud, wrapper, pageInfo, editorState.cropBox ?? box);
@@ -1917,10 +2102,124 @@ export class CanvasViewportView {
     }
   }
 
+  private ensureGridGeometry(doc: DocumentDto, cols: number) {
+    const key = `${editorState.documentVersion}:${editorState.rasterVersion}:${cols}`;
+    if (this.gridLayoutKey === key && this.gridItemBounds.length === doc.page_count) return;
+    this.gridLayoutKey = key;
+
+    const gap = 16;
+    const baseZoom = 0.32;
+    const n = doc.page_count;
+    const colWidths = new Array<number>(cols).fill(0);
+    const numRows = Math.ceil(n / cols);
+    const rowHeights = new Array<number>(numRows).fill(0);
+    const itemWidths = new Array<number>(n);
+    const itemHeights = new Array<number>(n);
+
+    for (let i = 0; i < n; i++) {
+      const p = doc.pages[i];
+      const w = Math.max(1, Math.round(p.width * baseZoom));
+      const h = Math.max(1, Math.round(p.height * baseZoom));
+      itemWidths[i] = w;
+      itemHeights[i] = h;
+      const c = i % cols;
+      const r = (i - c) / cols;
+      if (w > colWidths[c]) colWidths[c] = w;
+      if (h > rowHeights[r]) rowHeights[r] = h;
+    }
+
+    const colX = new Array<number>(cols);
+    let cx = 0;
+    for (let c = 0; c < cols; c++) {
+      colX[c] = cx;
+      cx += colWidths[c] + gap;
+    }
+
+    this.gridRowBounds = new Array(numRows);
+    let ry = 0;
+    for (let r = 0; r < numRows; r++) {
+      const top = ry;
+      const bottom = top + rowHeights[r];
+      this.gridRowBounds[r] = {
+        top,
+        bottom,
+        startIdx: r * cols,
+        endIdx: Math.min(n - 1, (r + 1) * cols - 1),
+      };
+      ry = bottom + gap;
+    }
+
+    this.gridItemBounds = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const c = i % cols;
+      const r = (i - c) / cols;
+      const left = colX[c];
+      const top = this.gridRowBounds[r].top;
+      this.gridItemBounds[i] = {
+        left,
+        top,
+        right: left + itemWidths[i],
+        bottom: top + itemHeights[i],
+      };
+    }
+  }
+
+  private computeGridPageGeometry(pageIndex: number) {
+    const doc = editorState.doc;
+    if (!doc || pageIndex < 0 || pageIndex >= doc.page_count) return null;
+    const cols = this.appliedGridColumns || Math.max(1, Math.min(doc.page_count, editorState.preferences.gridColumns || 4));
+    this.ensureGridGeometry(doc, cols);
+    const item = this.gridItemBounds[pageIndex];
+    if (!item) return null;
+
+    const scale = this.gridZoom ?? editorState.zoom;
+    const vpW = this.element.clientWidth;
+    const vpH = this.element.clientHeight;
+    if (vpW <= 0 || vpH <= 0 || scale <= 0) {
+      return { inViewport: pageIndex < 12, inMargin: pageIndex < 24, dist: pageIndex };
+    }
+
+    const left = item.left * scale + this.gridOrigin.x;
+    const right = item.right * scale + this.gridOrigin.x;
+    const top = item.top * scale + this.gridOrigin.y;
+    const bottom = item.bottom * scale + this.gridOrigin.y;
+
+    const inViewport = right >= 0 && left <= vpW && bottom >= 0 && top <= vpH;
+    const margin = 200;
+    const inMargin = right >= -margin && left <= vpW + margin && bottom >= -margin && top <= vpH + margin;
+    const dist = Math.hypot((left + right) / 2 - vpW / 2, (top + bottom) / 2 - vpH / 2);
+    return { inViewport, inMargin, dist };
+  }
+
+  private cancelWheelZoom() {
+    if (this.wheelZoomRaf) {
+      cancelAnimationFrame(this.wheelZoomRaf);
+      this.wheelZoomRaf = 0;
+    }
+    if (this.gridZoomingTimer) {
+      window.clearTimeout(this.gridZoomingTimer);
+      this.gridZoomingTimer = 0;
+    }
+    this.pagesContainer.classList.remove("grid-zooming");
+    this.pendingWheelZoomFactor = 1;
+    this.pendingWheelAnchor = null;
+  }
+
+  private scheduleClearGridZooming(delayMs = 200) {
+    if (this.gridZoomingTimer) {
+      window.clearTimeout(this.gridZoomingTimer);
+    }
+    this.gridZoomingTimer = window.setTimeout(() => {
+      this.gridZoomingTimer = 0;
+      this.pagesContainer.classList.remove("grid-zooming");
+    }, delayMs);
+  }
+
   private writeGridTransform() {
     this.pagesContainer.style.transform =
-      `translate(${this.gridOrigin.x}px, ${this.gridOrigin.y}px) scale(${this.gridZoom})`;
+      `translate3d(${this.gridOrigin.x}px, ${this.gridOrigin.y}px, 0) scale(${this.gridZoom})`;
     this.repositionActiveCropHud();
+    this.updateTextSelectionPopover();
   }
 
   private panGridBy(dx: number, dy: number) {
@@ -1934,10 +2233,46 @@ export class CanvasViewportView {
     const maxX = Math.max(pad, vpW - contentW - pad);
     const minY = Math.min(pad, vpH - contentH - pad);
     const maxY = pad;
-    this.gridOrigin.x = Math.max(minX, Math.min(maxX, this.gridOrigin.x + dx));
-    this.gridOrigin.y = Math.max(minY, Math.min(maxY, this.gridOrigin.y + dy));
+    if (dx !== 0) {
+      this.gridOrigin.x = Math.max(minX, Math.min(maxX, this.gridOrigin.x + dx));
+    }
+    if (dy !== 0) {
+      this.gridOrigin.y = Math.max(minY, Math.min(maxY, this.gridOrigin.y + dy));
+    }
     this.writeGridTransform();
     this.scheduleVirtualSync();
+  }
+
+  private cancelGridSmoothScroll() {
+    if (this.gridSmoothScrollRaf) {
+      cancelAnimationFrame(this.gridSmoothScrollRaf);
+      this.gridSmoothScrollRaf = 0;
+    }
+    this.gridScrollVel = { dx: 0, dy: 0 };
+  }
+
+  private smoothPanGridBy(dx: number, dy: number) {
+    this.gridScrollVel.dx += dx;
+    this.gridScrollVel.dy += dy;
+    if (this.gridSmoothScrollRaf) return;
+    const step = () => {
+      this.gridSmoothScrollRaf = 0;
+      if (!editorState.doc || editorState.viewMode !== "grid") {
+        this.gridScrollVel = { dx: 0, dy: 0 };
+        return;
+      }
+      const stepX = Math.abs(this.gridScrollVel.dx) < 0.35 ? this.gridScrollVel.dx : this.gridScrollVel.dx * 0.24;
+      const stepY = Math.abs(this.gridScrollVel.dy) < 0.35 ? this.gridScrollVel.dy : this.gridScrollVel.dy * 0.24;
+      this.gridScrollVel.dx -= stepX;
+      this.gridScrollVel.dy -= stepY;
+      this.panGridBy(stepX, stepY);
+      if (Math.abs(this.gridScrollVel.dx) >= 0.1 || Math.abs(this.gridScrollVel.dy) >= 0.1) {
+        this.gridSmoothScrollRaf = requestAnimationFrame(step);
+      } else {
+        this.gridScrollVel = { dx: 0, dy: 0 };
+      }
+    };
+    this.gridSmoothScrollRaf = requestAnimationFrame(step);
   }
 
   private cancelGridSmoothZoom() {
@@ -1946,6 +2281,7 @@ export class CanvasViewportView {
       this.gridSmoothZoomRaf = 0;
     }
     this.gridTargetAnchor = null;
+    this.cancelGridSmoothScroll();
   }
 
   private updateGridZoom(zoom: number) {
@@ -2047,12 +2383,11 @@ export class CanvasViewportView {
 
   private bindViewportEvents() {
     this.element.addEventListener("pointerdown", (event) => {
-      const grid = editorState.viewMode === "grid";
-      if ((event.button !== 0 && event.button !== 1) || (!grid && editorState.activeTool !== "hand" && event.button !== 1)) return;
+      if ((event.button !== 0 && event.button !== 1) || (editorState.activeTool !== "hand" && event.button !== 1)) return;
       const target = event.target as Element;
-      if (target.closest("button, input, [data-handle]")) return;
+      if (target.closest("button, input")) return;
+      if (event.button === 0 && target.closest("[data-handle]")) return;
       const page = target.closest<HTMLElement>(".pdf-page-wrapper")?.dataset.pageIndex;
-      if (event.button === 0 && page !== undefined && !["select", "hand", "crop"].includes(editorState.activeTool)) return;
       event.preventDefault();
       this.element.setPointerCapture(event.pointerId);
       this.cancelGridSmoothZoom();
@@ -2098,17 +2433,37 @@ export class CanvasViewportView {
         const units = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? this.element.clientHeight : 1;
         if (event.ctrlKey || event.metaKey) {
           const bounds = this.element.getBoundingClientRect();
-          this.gridZoomAnchor = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
-          this.isWheelZooming = true;
-          try {
-            editorState.setZoom(editorState.zoom * Math.exp(-event.deltaY * units * 0.002));
-          } finally {
-            this.isWheelZooming = false;
+          const sensitivity = editorState.preferences.zoomSensitivity ?? 1;
+          this.pendingWheelAnchor = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+          this.pendingWheelZoomFactor *= Math.exp(-event.deltaY * units * 0.002 * sensitivity);
+          this.pagesContainer.classList.add("grid-zooming");
+          this.scheduleClearGridZooming(200);
+          if (!this.wheelZoomRaf) {
+            this.wheelZoomRaf = requestAnimationFrame(() => {
+              this.wheelZoomRaf = 0;
+              const factor = this.pendingWheelZoomFactor;
+              const anchor = this.pendingWheelAnchor;
+              this.pendingWheelZoomFactor = 1;
+              this.pendingWheelAnchor = null;
+              if (!editorState.doc || editorState.viewMode !== "grid") return;
+              this.gridZoomAnchor = anchor;
+              this.isWheelZooming = true;
+              try {
+                editorState.setZoom(editorState.zoom * factor);
+              } finally {
+                this.isWheelZooming = false;
+              }
+            });
           }
         } else {
           const dx = (event.shiftKey && event.deltaX === 0 ? event.deltaY : event.deltaX) * units;
           const dy = (event.shiftKey && event.deltaX === 0 ? 0 : event.deltaY) * units;
-          this.panGridBy(-dx, -dy);
+          const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+          if (editorState.preferences.smoothZoom && !reducedMotion) {
+            this.smoothPanGridBy(-dx, -dy);
+          } else {
+            this.panGridBy(-dx, -dy);
+          }
         }
       } else if (event.ctrlKey || event.metaKey) {
         event.preventDefault();
@@ -2335,5 +2690,394 @@ export class CanvasViewportView {
       this.fitZoomFrame = 0;
       this.applyFitZoom(fitMode);
     });
+  }
+
+  private getOverlayCacheKey(pageIndex: number): string {
+    const rev = editorState.doc?.page_revisions?.[pageIndex] ?? editorState.doc?.revision_id ?? 0;
+    return `${editorState.documentVersion}:${rev}:${pageIndex}`;
+  }
+
+  private async hydratePageOverlays(wrapper: HTMLElement, pageIndex: number, pageInfo: PageInfo) {
+    const docVersion = editorState.documentVersion;
+    const cacheKey = this.getOverlayCacheKey(pageIndex);
+
+    this.renderFormLayerOnWrapper(wrapper, pageIndex, pageInfo);
+
+    try {
+      let spans = this.textSpansCache.get(cacheKey);
+      if (!spans) {
+        spans = await Backend.getPageTextSpans(pageIndex);
+        if (editorState.documentVersion !== docVersion) return;
+        this.textSpansCache.set(cacheKey, spans);
+      }
+      if (wrapper.dataset.hydrated === "1") {
+        this.renderTextLayer(wrapper, pageIndex, pageInfo, spans);
+      }
+    } catch {
+      // Non-fatal: page may be image-only or closed
+    }
+
+    try {
+      let links = this.linksCache.get(cacheKey);
+      if (!links) {
+        links = await Backend.getPageLinks(pageIndex);
+        if (editorState.documentVersion !== docVersion) return;
+        this.linksCache.set(cacheKey, links);
+      }
+      if (wrapper.dataset.hydrated === "1") {
+        this.renderLinkLayer(wrapper, pageInfo, links);
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  private renderTextLayer(wrapper: HTMLElement, pageIndex: number, pageInfo: PageInfo, spans: TextSpanDto[]) {
+    const layer = wrapper.querySelector<HTMLElement>(".pdf-text-layer");
+    if (!layer || pageInfo.width <= 0 || pageInfo.height <= 0) return;
+
+    const frag = document.createDocumentFragment();
+    for (const span of spans) {
+      const el = document.createElement("span");
+      el.className = "pdf-text-span";
+      el.textContent = span.text;
+      el.dataset.pageIndex = String(pageIndex);
+      el.dataset.x = String(span.rect.x);
+      el.dataset.y = String(span.rect.y);
+      el.dataset.w = String(span.rect.width);
+      el.dataset.h = String(span.rect.height);
+      el.style.left = `${(span.rect.x / pageInfo.width) * 100}%`;
+      el.style.top = `${(span.rect.y / pageInfo.height) * 100}%`;
+      el.style.width = `${(span.rect.width / pageInfo.width) * 100}%`;
+      el.style.height = `${(span.rect.height / pageInfo.height) * 100}%`;
+      el.style.fontSize = `calc(${Math.max(4, span.rect.height * 0.85)}px * var(--page-zoom, 1))`;
+      frag.appendChild(el);
+      frag.appendChild(document.createTextNode(" "));
+    }
+    layer.replaceChildren(frag);
+  }
+
+  private renderLinkLayer(wrapper: HTMLElement, pageInfo: PageInfo, links: LinkDto[]) {
+    const layer = wrapper.querySelector<HTMLElement>(".pdf-link-layer");
+    if (!layer || pageInfo.width <= 0 || pageInfo.height <= 0) return;
+
+    const frag = document.createDocumentFragment();
+    for (const link of links) {
+      const hit = document.createElement("a");
+      hit.className = "pdf-link-hit";
+      hit.href = link.uri || `#page-${(link.target_page ?? 0) + 1}`;
+      hit.title = link.uri ? link.uri : `Go to page ${(link.target_page ?? 0) + 1}`;
+      hit.style.left = `${(link.rect.x / pageInfo.width) * 100}%`;
+      hit.style.top = `${(link.rect.y / pageInfo.height) * 100}%`;
+      hit.style.width = `${(link.rect.width / pageInfo.width) * 100}%`;
+      hit.style.height = `${(link.rect.height / pageInfo.height) * 100}%`;
+
+      hit.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof link.target_page === "number") {
+          jumpToPage(link.target_page);
+        } else if (link.uri) {
+          void Backend.openExternalUrl(link.uri).catch((err) => {
+            toast.show({ message: `Could not open link: ${String(err)}`, type: "error" });
+          });
+        }
+      });
+      frag.appendChild(hit);
+    }
+    layer.replaceChildren(frag);
+  }
+
+  private syncFormFieldsForDocument() {
+    const doc = editorState.doc;
+    if (!doc) return;
+    const key = `${editorState.documentVersion}:${doc.revision_id}`;
+    if (this.formFieldsVersionKey === key || this.formFieldsLoading) return;
+
+    this.formFieldsLoading = true;
+    const targetDocVer = editorState.documentVersion;
+    void Backend.getFormFields()
+      .then((fields) => {
+        if (editorState.documentVersion !== targetDocVer) return;
+        this.formFieldsVersionKey = key;
+        this.formFields = fields;
+        window.dispatchEvent(new CustomEvent("form-fields-updated", { detail: fields.length }));
+        for (const pageIndex of this.hydratedPages) {
+          const wrapper = this.pagesContainer.querySelector<HTMLElement>(`#pdf-page-${pageIndex}`);
+          const pageInfo = editorState.doc?.pages[pageIndex];
+          if (wrapper && pageInfo) {
+            this.renderFormLayerOnWrapper(wrapper, pageIndex, pageInfo);
+          }
+        }
+      })
+      .catch(() => {
+        // Non-fatal
+      })
+      .finally(() => {
+        this.formFieldsLoading = false;
+      });
+  }
+
+  private renderFormLayerOnWrapper(wrapper: HTMLElement, pageIndex: number, pageInfo: PageInfo) {
+    const layer = wrapper.querySelector<HTMLElement>(".pdf-form-layer");
+    if (!layer || pageInfo.width <= 0 || pageInfo.height <= 0) return;
+
+    const pageFields = this.formFields.filter((f) => f.page_index === pageIndex);
+    if (pageFields.length === 0) {
+      layer.replaceChildren();
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const field of pageFields) {
+      let control: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+      if (field.field_type === "checkbox") {
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.checked = field.value === "true";
+        input.addEventListener("change", () => {
+          void this.commitFormField(field.id, input.checked ? "true" : "false");
+        });
+        control = input;
+      } else if (field.field_type === "radio") {
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = `pdf-radio-${field.name}`;
+        input.checked = Boolean(field.export_value && field.value === field.export_value);
+        input.addEventListener("change", () => {
+          if (input.checked) {
+            void this.commitFormField(field.id, field.export_value || "Yes");
+          }
+        });
+        control = input;
+      } else if (field.field_type === "dropdown" || field.field_type === "listbox") {
+        const select = document.createElement("select");
+        if (field.field_type === "listbox") select.size = Math.min(4, Math.max(2, field.options.length));
+        for (const opt of field.options) {
+          select.appendChild(new Option(opt, opt, false, opt === field.value));
+        }
+        if (field.value && !field.options.includes(field.value)) {
+          select.prepend(new Option(field.value, field.value, true, true));
+        }
+        select.addEventListener("change", () => {
+          void this.commitFormField(field.id, select.value);
+        });
+        control = select;
+      } else if (field.multiline) {
+        const textarea = document.createElement("textarea");
+        textarea.value = field.value;
+        if (field.max_len) textarea.maxLength = field.max_len;
+        textarea.addEventListener("change", () => {
+          void this.commitFormField(field.id, textarea.value);
+        });
+        control = textarea;
+      } else {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = field.value;
+        if (field.max_len) input.maxLength = field.max_len;
+        input.addEventListener("change", () => {
+          void this.commitFormField(field.id, input.value);
+        });
+        control = input;
+      }
+
+      control.className = "pdf-form-control";
+      control.disabled = field.read_only;
+      control.title = field.name;
+      control.setAttribute("aria-label", field.name);
+      control.style.left = `${(field.rect.x / pageInfo.width) * 100}%`;
+      control.style.top = `${(field.rect.y / pageInfo.height) * 100}%`;
+      control.style.width = `${(field.rect.width / pageInfo.width) * 100}%`;
+      control.style.height = `${(field.rect.height / pageInfo.height) * 100}%`;
+      if (field.field_type !== "checkbox" && field.field_type !== "radio") {
+        const fsize = field.font_size ?? Math.max(9, Math.min(14, field.rect.height * 0.65));
+        control.style.fontSize = `calc(${fsize}px * var(--page-zoom, 1))`;
+      }
+      control.addEventListener("pointerdown", (e) => e.stopPropagation());
+      frag.appendChild(control);
+    }
+    layer.replaceChildren(frag);
+  }
+
+  private async commitFormField(fieldId: string, value: string) {
+    const docVer = editorState.documentVersion;
+    try {
+      const updated = await Backend.setFormFieldValue(fieldId, value);
+      if (editorState.documentVersion === docVer) {
+        editorState.updateDocument(updated);
+      }
+    } catch (err) {
+      toast.show({ message: `Could not update form field: ${String(err)}`, type: "error" });
+    }
+  }
+
+  private createTextSelectionPopover(): HTMLElement {
+    const bar = document.createElement("div");
+    bar.className = "text-selection-popover";
+    bar.hidden = true;
+    bar.setAttribute("role", "toolbar");
+    bar.setAttribute("aria-label", "Text selection actions");
+
+    const actions: Array<{ id: string; label: string; iconHtml: string; cls?: string }> = [
+      { id: "copy", label: "Copy", iconHtml: icon(Copy, 14) },
+      { id: "highlight", label: "Highlight", iconHtml: icon(Highlighter, 14) },
+      { id: "underline", label: "Underline", iconHtml: icon(Underline, 14) },
+      { id: "strikeout", label: "Strike", iconHtml: icon(Strikethrough, 14) },
+      { id: "squiggly", label: "Squiggly", iconHtml: icon(Underline, 14) },
+      { id: "trueRedact", label: "Redact", iconHtml: icon(ShieldAlert, 14), cls: "destructive" },
+    ];
+
+    for (const act of actions) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `ui-button ui-button--tool ${act.cls ?? ""}`.trim();
+      btn.dataset.action = act.id;
+      btn.innerHTML = `${act.iconHtml}<span>${act.label}</span>`;
+      btn.addEventListener("mousedown", (e) => e.preventDefault());
+      btn.addEventListener("click", () => void this.handleTextSelectionAction(act.id));
+      bar.appendChild(btn);
+    }
+    return bar;
+  }
+
+  private selectionTimer = 0;
+  private scheduleTextSelectionPopover() {
+    clearTimeout(this.selectionTimer);
+    this.selectionTimer = window.setTimeout(() => this.updateTextSelectionPopover(), 60);
+  }
+
+  private hideTextSelectionPopover() {
+    this.textSelectionPopover.hidden = true;
+  }
+
+  private getSelectedTextBoxes(): { text: string; boxes: Array<{ pageIndex: number; rect: PageBox }>; clientRect: DOMRect | null } {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      return { text: "", boxes: [], clientRect: null };
+    }
+    const text = sel.toString().trim();
+    if (!text) return { text: "", boxes: [], clientRect: null };
+
+    const range = sel.getRangeAt(0);
+    const spans = Array.from(this.pagesContainer.querySelectorAll<HTMLElement>(".pdf-text-span")).filter((span) =>
+      sel.containsNode(span, true)
+    );
+    if (spans.length === 0) return { text: "", boxes: [], clientRect: null };
+
+    const byPage = new Map<number, PageBox[]>();
+    for (const span of spans) {
+      const pageIndex = Number(span.dataset.pageIndex);
+      const rect: PageBox = {
+        x: Number(span.dataset.x),
+        y: Number(span.dataset.y),
+        width: Number(span.dataset.w),
+        height: Number(span.dataset.h),
+      };
+      if (!Number.isFinite(pageIndex) || !Number.isFinite(rect.x)) continue;
+      const list = byPage.get(pageIndex) ?? [];
+      const prev = list[list.length - 1];
+      if (prev && Math.abs(rect.y - prev.y) <= Math.max(prev.height, rect.height) * 0.6) {
+        const minX = Math.min(prev.x, rect.x);
+        const minY = Math.min(prev.y, rect.y);
+        const maxX = Math.max(prev.x + prev.width, rect.x + rect.width);
+        const maxY = Math.max(prev.y + prev.height, rect.y + rect.height);
+        list[list.length - 1] = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+      } else {
+        list.push(rect);
+      }
+      byPage.set(pageIndex, list);
+    }
+
+    const boxes: Array<{ pageIndex: number; rect: PageBox }> = [];
+    for (const [pageIndex, rects] of byPage) {
+      for (const rect of rects) boxes.push({ pageIndex, rect });
+    }
+    return { text, boxes, clientRect: range.getBoundingClientRect() };
+  }
+
+  private updateTextSelectionPopover() {
+    if (!editorState.doc || editorState.activeTool !== "select") {
+      this.hideTextSelectionPopover();
+      return;
+    }
+    const { boxes, clientRect } = this.getSelectedTextBoxes();
+    if (boxes.length === 0 || !clientRect || (clientRect.width === 0 && clientRect.height === 0)) {
+      this.hideTextSelectionPopover();
+      return;
+    }
+    const vp = this.element.getBoundingClientRect();
+    if (
+      clientRect.bottom < vp.top ||
+      clientRect.top > vp.bottom ||
+      clientRect.right < vp.left ||
+      clientRect.left > vp.right
+    ) {
+      this.hideTextSelectionPopover();
+      return;
+    }
+    this.textSelectionPopover.hidden = false;
+    const popRect = this.textSelectionPopover.getBoundingClientRect();
+    const top = Math.max(8, clientRect.top - popRect.height - 8);
+    const left = Math.max(8, Math.min(window.innerWidth - popRect.width - 8, clientRect.left + clientRect.width / 2 - popRect.width / 2));
+    this.textSelectionPopover.style.top = `${top}px`;
+    this.textSelectionPopover.style.left = `${left}px`;
+  }
+
+  private async handleTextSelectionAction(action: string) {
+    const { text, boxes } = this.getSelectedTextBoxes();
+    if (!text || boxes.length === 0) return;
+
+    if (action === "copy") {
+      try {
+        await navigator.clipboard.writeText(text);
+        toast.show({ message: "Copied selected text.", type: "success", durationMs: 1800 });
+      } catch {
+        document.execCommand("copy");
+      }
+      this.hideTextSelectionPopover();
+      return;
+    }
+
+    if (action === "trueRedact") {
+      for (const item of boxes) {
+        extState.addPendingRedaction?.({ page_index: item.pageIndex, rect: item.rect });
+      }
+      window.getSelection()?.removeAllRanges();
+      this.hideTextSelectionPopover();
+      toast.show({ message: `Marked ${boxes.length} text region(s) for redaction.`, type: "info" });
+      return;
+    }
+
+    const toolMap: Record<string, ToolType> = {
+      highlight: "highlight",
+      underline: "underline",
+      strikeout: "strikeout",
+      squiggly: "squiggly",
+    };
+    const tool = toolMap[action];
+    if (!tool) return;
+
+    const docVer = editorState.documentVersion;
+    try {
+      let latestDoc = editorState.doc;
+      for (const { pageIndex, rect } of boxes) {
+        const pts: DrawPoint[] = [
+          { x: rect.x, y: rect.y },
+          { x: rect.x + rect.width, y: rect.y + rect.height },
+        ];
+        const annot = buildAnnotation(tool, pageIndex, pts, editorState.toolSettings, null);
+        if (annot) {
+          latestDoc = await Backend.addAnnotation(annot);
+        }
+      }
+      if (latestDoc && editorState.documentVersion === docVer) {
+        editorState.updateDocument(latestDoc);
+      }
+      window.getSelection()?.removeAllRanges();
+      this.hideTextSelectionPopover();
+    } catch (err) {
+      toast.show({ message: `Could not apply markup: ${String(err)}`, type: "error" });
+    }
   }
 }

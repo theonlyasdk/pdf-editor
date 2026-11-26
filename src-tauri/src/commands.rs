@@ -3,6 +3,7 @@ use parking_lot::Mutex;
 use pdf_core::batch_overlay::BatchOverlayCommand;
 use pdf_core::commands::*;
 use pdf_core::document::{CoreError, DocumentState};
+use pdf_core::forms::{extract_form_fields, flatten_form_fields as core_flatten_form_fields};
 use pdf_core::persistence::safe_save;
 use pdf_core::range_parser::parse_page_range;
 use pdf_core::redaction::{apply_area_redactions as core_apply_area_redactions, apply_cover_erase, apply_true_redact};
@@ -13,10 +14,27 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use tauri::State;
+use std::sync::{Arc, OnceLock};
+use tauri::{Manager, State};
 
 static IMAGE_ANNOT_COUNTER: AtomicU64 = AtomicU64::new(1);
+static RENDER_GENERATIONS: OnceLock<Mutex<HashMap<u64, Arc<AtomicU64>>>> = OnceLock::new();
+
+fn generation_slot(queue_id: u64) -> Arc<AtomicU64> {
+    let map = RENDER_GENERATIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut lock = map.lock();
+    lock.entry(queue_id)
+        .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+        .clone()
+}
+
+#[inline]
+fn is_stale_generation(generation: Option<u64>, slot: Option<&Arc<AtomicU64>>) -> bool {
+    match (generation, slot) {
+        (Some(gen_id), Some(s)) => gen_id < s.load(Ordering::Acquire),
+        _ => false,
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct DocumentDto {
@@ -282,9 +300,12 @@ impl AppState {
 
     pub fn to_dto(&self) -> Result<DocumentDto, String> {
         let doc = self.doc.as_ref().ok_or("No document open")?;
+        let labels = doc.get_page_labels();
         let mut pages = Vec::new();
         for i in 0..doc.page_count() {
-            pages.push(doc.get_page_info(i).map_err(|e| e.to_string())?);
+            let mut info = doc.get_page_info(i).map_err(|e| e.to_string())?;
+            info.label = labels.get(i).cloned().flatten();
+            pages.push(info);
         }
 
         let file_name = self
@@ -362,9 +383,12 @@ pub async fn open_document(
         let doc = DocumentState::from_bytes(&bytes).map_err(|e| e.to_string())?;
         let metadata = doc.get_metadata(bytes.len() as u64);
 
+        let labels = doc.get_page_labels();
         let mut pages = Vec::new();
         for i in 0..doc.page_count() {
-            pages.push(doc.get_page_info(i).map_err(|e| e.to_string())?);
+            let mut info = doc.get_page_info(i).map_err(|e| e.to_string())?;
+            info.label = labels.get(i).cloned().flatten();
+            pages.push(info);
         }
 
         let file_name = p
@@ -446,11 +470,25 @@ pub async fn render_page(
     page_index: usize,
     target_width: u32,
     format: Option<String>,
+    generation: Option<u64>,
+    queue_id: Option<u64>,
     state: State<'_, SharedState>,
 ) -> Result<tauri::ipc::Response, String> {
+    let gen_slot = generation.map(|_| generation_slot(queue_id.unwrap_or(0)));
+    if let (Some(gen_id), Some(slot)) = (generation, gen_slot.as_ref()) {
+        let prev = slot.fetch_max(gen_id, Ordering::AcqRel);
+        if gen_id < prev {
+            return Err("cancelled".to_string());
+        }
+    }
+
     let state = Arc::clone(state.inner());
     let want_png = matches!(format.as_deref(), Some("png"));
     tauri::async_runtime::spawn_blocking(move || {
+        if is_stale_generation(generation, gen_slot.as_ref()) {
+            return Err("cancelled".to_string());
+        }
+
         enum RenderPlan {
             Hit(Arc<pdf_core::renderer::RawBitmap>),
             Miss {
@@ -466,6 +504,14 @@ pub async fn render_page(
 
         let plan = {
             let mut lock = state.lock();
+            if is_stale_generation(generation, gen_slot.as_ref()) {
+                return Err("cancelled".to_string());
+            }
+            if generation.is_some() {
+                if let Some(pool) = lock.worker_pool.as_ref() {
+                    pool.wake_waiters();
+                }
+            }
             let page_uid = *lock
                 .page_uids
                 .get(page_index)
@@ -484,6 +530,9 @@ pub async fn render_page(
             if let Some(cached) = renderer.get_cached_rgba(doc_uid, page_uid, page_rev, target_width) {
                 RenderPlan::Hit(cached)
             } else {
+                if is_stale_generation(generation, gen_slot.as_ref()) {
+                    return Err("cancelled".to_string());
+                }
                 let (source_id, bytes, _) = lock.ensure_render_source()?;
                 let worker_pool = lock.ensure_worker_pool();
                 RenderPlan::Miss {
@@ -509,18 +558,33 @@ pub async fn render_page(
                 renderer,
                 worker_pool,
             } => {
+                if is_stale_generation(generation, gen_slot.as_ref()) {
+                    return Err("cancelled".to_string());
+                }
                 let raw = if let Some(pool) = worker_pool {
-                    match pool.render_page_rgba(source_id, &bytes, page_index, target_width) {
+                    match pool.render_page_rgba_cancellable(
+                        source_id,
+                        &bytes,
+                        page_index,
+                        target_width,
+                        || is_stale_generation(generation, gen_slot.as_ref()),
+                    ) {
                         Ok(bmp) => bmp,
-                        Err(_) => renderer
-                            .render_page_rgba_for_source(
-                                source_id,
-                                bytes,
-                                page_index,
-                                target_width,
-                                None,
-                            )
-                            .map_err(|e| e.to_string())?,
+                        Err(err) if err == "cancelled" => return Err(err),
+                        Err(_) => {
+                            if is_stale_generation(generation, gen_slot.as_ref()) {
+                                return Err("cancelled".to_string());
+                            }
+                            renderer
+                                .render_page_rgba_for_source(
+                                    source_id,
+                                    bytes,
+                                    page_index,
+                                    target_width,
+                                    None,
+                                )
+                                .map_err(|e| e.to_string())?
+                        }
                     }
                 } else {
                     renderer
@@ -533,6 +597,9 @@ pub async fn render_page(
                         )
                         .map_err(|e| e.to_string())?
                 };
+                if is_stale_generation(generation, gen_slot.as_ref()) {
+                    return Err("cancelled".to_string());
+                }
                 let arc = Arc::new(raw);
                 renderer.put_cached_rgba(
                     doc_uid,
@@ -544,6 +611,10 @@ pub async fn render_page(
                 arc
             }
         };
+
+        if is_stale_generation(generation, gen_slot.as_ref()) {
+            return Err("cancelled".to_string());
+        }
 
         if want_png {
             let png = encode_png_fast(&bitmap).map_err(|e| e.to_string())?;
@@ -820,7 +891,11 @@ pub fn redo(state: State<'_, SharedState>) -> Result<DocumentDto, String> {
 }
 
 #[tauri::command]
-pub fn save_document(make_backup: bool, state: State<'_, SharedState>) -> Result<(), String> {
+pub fn save_document(
+    make_backup: bool,
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
     let mut lock = state.lock();
     let path = lock
         .current_path
@@ -835,6 +910,7 @@ pub fn save_document(make_backup: bool, state: State<'_, SharedState>) -> Result
         lock.file_size_bytes = meta.len();
     }
     lock.cmd_mgr.mark_saved();
+    clear_recovery_files(&app);
     Ok(())
 }
 
@@ -842,6 +918,7 @@ pub fn save_document(make_backup: bool, state: State<'_, SharedState>) -> Result
 pub fn save_document_as(
     target_path: String,
     make_backup: bool,
+    app: tauri::AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
     let p = PathBuf::from(&target_path);
@@ -856,6 +933,7 @@ pub fn save_document_as(
     lock.current_path = Some(p);
     lock.custom_name = None;
     lock.cmd_mgr.mark_saved();
+    clear_recovery_files(&app);
     Ok(())
 }
 
@@ -868,9 +946,11 @@ pub fn evaluate_range(expression: String, total_pages: usize) -> Result<Vec<usiz
 pub async fn search_document(
     query: String,
     case_sensitive: bool,
+    is_regex: Option<bool>,
     state: State<'_, SharedState>,
 ) -> Result<Vec<SearchResult>, String> {
     let state = Arc::clone(state.inner());
+    let use_regex = is_regex.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
         let (source_id, renderer, bytes, pages) = {
             let mut lock = state.lock();
@@ -884,9 +964,15 @@ pub async fn search_document(
             let (source_id, bytes, renderer) = lock.ensure_render_source()?;
             (source_id, renderer, bytes, pages)
         };
-        let mut results = renderer
-            .search_document_arc(source_id, bytes, &query, case_sensitive, None)
-            .map_err(|e| e.to_string())?;
+        let mut results = if use_regex {
+            renderer
+                .search_document_regex_arc(source_id, bytes, &query, case_sensitive, None)
+                .map_err(|e| e.to_string())?
+        } else {
+            renderer
+                .search_document_arc(source_id, bytes, &query, case_sensitive, None)
+                .map_err(|e| e.to_string())?
+        };
         for hit in &mut results {
             for rect in &mut hit.bounding_boxes {
                 *rect = pages[hit.page_index].pdf_rect_to_viewport(*rect);
@@ -1138,6 +1224,138 @@ pub fn get_document_outline(state: State<'_, SharedState>) -> Result<Vec<Outline
 }
 
 #[tauri::command]
+pub fn update_document_outline(
+    items: Vec<OutlineItem>,
+    state: State<'_, SharedState>,
+) -> Result<DocumentDto, String> {
+    let mut lock = state.lock();
+    let previous_outline = lock
+        .doc
+        .as_ref()
+        .ok_or("No document open")?
+        .get_outline()
+        .map_err(|e| e.to_string())?;
+    let cmd = Box::new(UpdateOutlineCommand {
+        previous_outline,
+        new_outline: items,
+    });
+    lock.execute_cmd(cmd).map_err(|e| e.to_string())?;
+    lock.to_dto()
+}
+
+#[tauri::command]
+pub async fn get_page_text_spans(
+    page_index: usize,
+    state: State<'_, SharedState>,
+) -> Result<Vec<TextSpanDto>, String> {
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let (source_id, renderer, bytes, page_info) = {
+            let mut lock = state.lock();
+            let page_info = lock
+                .doc
+                .as_ref()
+                .ok_or("No document open")?
+                .get_page_info(page_index)
+                .map_err(|e| e.to_string())?;
+            let (source_id, bytes, renderer) = lock.ensure_render_source()?;
+            (source_id, renderer, bytes, page_info)
+        };
+        let mut spans = renderer
+            .extract_page_text_spans_arc(source_id, bytes, page_index, None)
+            .map_err(|e| e.to_string())?;
+        for span in &mut spans {
+            span.rect = page_info.pdf_rect_to_viewport(span.rect);
+        }
+        Ok(spans)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn get_page_links(
+    page_index: usize,
+    state: State<'_, SharedState>,
+) -> Result<Vec<LinkDto>, String> {
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let (source_id, renderer, bytes, page_info) = {
+            let mut lock = state.lock();
+            let page_info = lock
+                .doc
+                .as_ref()
+                .ok_or("No document open")?
+                .get_page_info(page_index)
+                .map_err(|e| e.to_string())?;
+            let (source_id, bytes, renderer) = lock.ensure_render_source()?;
+            (source_id, renderer, bytes, page_info)
+        };
+        let mut links = renderer
+            .extract_page_links_arc(source_id, bytes, page_index, None)
+            .map_err(|e| e.to_string())?;
+        for link in &mut links {
+            link.rect = page_info.pdf_rect_to_viewport(link.rect);
+        }
+        Ok(links)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn get_form_fields(state: State<'_, SharedState>) -> Result<Vec<FormFieldDto>, String> {
+    let lock = state.lock();
+    let doc = lock.doc.as_ref().ok_or("No document open")?;
+    let mut fields = extract_form_fields(doc).map_err(|e| e.to_string())?;
+    for field in &mut fields {
+        if let Ok(page_info) = doc.get_page_info(field.page_index) {
+            field.rect = page_info.pdf_rect_to_viewport(field.rect);
+        }
+    }
+    Ok(fields)
+}
+
+#[tauri::command]
+pub fn set_form_field_value(
+    field_id: String,
+    value: String,
+    state: State<'_, SharedState>,
+) -> Result<DocumentDto, String> {
+    let mut lock = state.lock();
+    let old_value = {
+        let doc = lock.doc.as_ref().ok_or("No document open")?;
+        extract_form_fields(doc)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|f| f.id == field_id)
+            .map(|f| f.value)
+            .unwrap_or_default()
+    };
+    let cmd = Box::new(SetFormFieldCommand {
+        field_id,
+        old_value,
+        new_value: value,
+        page_index: 0,
+    });
+    lock.execute_cmd(cmd).map_err(|e| e.to_string())?;
+    lock.to_dto()
+}
+
+#[tauri::command]
+pub fn flatten_form_fields(state: State<'_, SharedState>) -> Result<DocumentDto, String> {
+    let mut lock = state.lock();
+    let doc = lock.doc.as_mut().ok_or("No document open")?;
+    let affected = core_flatten_form_fields(doc).map_err(|e| e.to_string())?;
+    if !affected.is_empty() {
+        lock.cmd_mgr.bump_revision_dirty();
+        lock.bump_page_revisions(&affected);
+        lock.invalidate_render_source();
+    }
+    lock.to_dto()
+}
+
+#[tauri::command]
 pub async fn detect_crop_margins(
     page_index: usize,
     state: State<'_, SharedState>,
@@ -1248,10 +1466,202 @@ pub fn rename_document(new_name: String, state: State<'_, SharedState>) -> Resul
     lock.to_dto()
 }
 
+pub struct LaunchFileState(pub Mutex<Option<String>>);
+
+pub fn extract_launch_file_from_args<I, S>(args: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString>,
+{
+    for raw in args.into_iter().skip(1) {
+        let os: std::ffi::OsString = raw.into();
+        let Some(s) = os.to_str() else {
+            continue;
+        };
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed.starts_with('-') {
+            continue;
+        }
+        let path = std::path::Path::new(trimmed);
+        let is_pdf = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+        if !is_pdf && !path.is_file() {
+            continue;
+        }
+        if let Ok(canon) = std::fs::canonicalize(path) {
+            let lossy = canon.to_string_lossy();
+            let normalized = lossy.strip_prefix(r"\\?\").unwrap_or(&lossy);
+            return Some(normalized.to_string());
+        }
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
+#[tauri::command]
+pub fn consume_launch_file(state: State<'_, LaunchFileState>) -> Option<String> {
+    state.0.lock().take()
+}
+
+#[tauri::command]
+pub fn read_image_data_url(path: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let p = std::path::Path::new(&path);
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        _ => return Err("Only PNG and JPEG images are supported.".to_string()),
+    };
+    let meta = std::fs::metadata(p).map_err(|e| format!("Could not read image: {e}"))?;
+    if meta.len() > 25 * 1024 * 1024 {
+        return Err("Image file exceeds 25 MB limit.".to_string());
+    }
+    let bytes = std::fs::read(p).map_err(|e| format!("Could not read image: {e}"))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{b64}"))
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct RecoveryInfoDto {
+    pub original_path: Option<String>,
+    pub file_name: String,
+    pub saved_at_ms: u64,
+}
+
+fn recovery_dir(app: &tauri::AppHandle) -> PathBuf {
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("pdf-editor"));
+    base.join("recovery")
+}
+
+pub fn clear_recovery_files(app: &tauri::AppHandle) {
+    let dir = recovery_dir(app);
+    let _ = std::fs::remove_file(dir.join("recovery.pdf"));
+    let _ = std::fs::remove_file(dir.join("recovery.pdf.tmp"));
+    let _ = std::fs::remove_file(dir.join("recovery.json"));
+    let _ = std::fs::remove_file(dir.join("recovery.json.tmp"));
+}
+
+#[tauri::command]
+pub fn snapshot_recovery_state(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<bool, String> {
+    let lock = state.lock();
+    if !lock.cmd_mgr.is_dirty() {
+        return Ok(false);
+    }
+    let Some(doc) = lock.doc.as_ref() else {
+        return Ok(false);
+    };
+    let mut snapshot = doc.clone();
+    pdf_core::annotations::commit_annotations_to_pdf(&mut snapshot).map_err(|e| e.to_string())?;
+    let bytes = snapshot.to_bytes().map_err(|e| e.to_string())?;
+
+    let original_path = lock
+        .current_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string());
+    let file_name = lock
+        .current_path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(ToString::to_string)
+        .or_else(|| lock.custom_name.clone())
+        .unwrap_or_else(|| "Untitled.pdf".to_string());
+    drop(lock);
+
+    let dir = recovery_dir(&app);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let pdf_tmp = dir.join("recovery.pdf.tmp");
+    let pdf_path = dir.join("recovery.pdf");
+    std::fs::write(&pdf_tmp, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&pdf_tmp, &pdf_path).map_err(|e| e.to_string())?;
+
+    let saved_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let meta = RecoveryInfoDto {
+        original_path,
+        file_name,
+        saved_at_ms,
+    };
+    let json_bytes = serde_json::to_vec(&meta).map_err(|e| e.to_string())?;
+    let json_tmp = dir.join("recovery.json.tmp");
+    let json_path = dir.join("recovery.json");
+    std::fs::write(&json_tmp, json_bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&json_tmp, &json_path).map_err(|e| e.to_string())?;
+
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn check_recovery_state(app: tauri::AppHandle) -> Result<Option<RecoveryInfoDto>, String> {
+    let dir = recovery_dir(&app);
+    let pdf_path = dir.join("recovery.pdf");
+    let json_path = dir.join("recovery.json");
+    if !pdf_path.is_file() || !json_path.is_file() {
+        return Ok(None);
+    }
+    let data = std::fs::read(&json_path).map_err(|e| e.to_string())?;
+    let info: RecoveryInfoDto = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+    Ok(Some(info))
+}
+
+#[tauri::command]
+pub fn restore_recovery_state(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<DocumentDto, String> {
+    let dir = recovery_dir(&app);
+    let pdf_path = dir.join("recovery.pdf");
+    let json_path = dir.join("recovery.json");
+    let info: RecoveryInfoDto = std::fs::read(&json_path)
+        .ok()
+        .and_then(|d| serde_json::from_slice(&d).ok())
+        .unwrap_or(RecoveryInfoDto {
+            original_path: None,
+            file_name: "Recovered.pdf".to_string(),
+            saved_at_ms: 0,
+        });
+
+    let loaded = DocumentState::from_file(&pdf_path).map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&pdf_path).ok();
+    let file_size = bytes.as_ref().map(|b| b.len() as u64).unwrap_or(0);
+
+    let mut lock = state.lock();
+    lock.doc = Some(loaded);
+    lock.current_path = info.original_path.map(PathBuf::from);
+    lock.custom_name = Some(info.file_name);
+    lock.file_size_bytes = file_size;
+    lock.cmd_mgr = CommandManager::new();
+    lock.cmd_mgr.bump_revision_dirty();
+    lock.reset_page_tracking(bytes);
+    clear_recovery_files(&app);
+    lock.to_dto()
+}
+
+#[tauri::command]
+pub fn discard_recovery_state(app: tauri::AppHandle) -> Result<(), String> {
+    clear_recovery_files(&app);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn open_external_url(url: String) -> Result<(), String> {
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err("Only http/https URLs are supported".to_string());
+    if !url.starts_with("https://") && !url.starts_with("http://") && !url.starts_with("mailto:") {
+        return Err("Only http/https/mailto URLs are supported".to_string());
     }
 
     #[cfg(target_os = "windows")]
@@ -1356,5 +1766,18 @@ mod tests {
         state.clear_for_exit();
         assert!(state.doc.is_none());
         assert!(state.page_uids.is_empty());
+    }
+
+    #[test]
+    fn extract_launch_file_from_args_skips_flags_and_picks_pdf() {
+        assert_eq!(extract_launch_file_from_args(["pdf-editor.exe"]), None);
+        assert_eq!(
+            extract_launch_file_from_args(["pdf-editor.exe", "--verbose", "docs/sample.pdf"]),
+            Some("docs/sample.pdf".to_string())
+        );
+        assert_eq!(
+            extract_launch_file_from_args(["pdf-editor.exe", "--flag"]),
+            None
+        );
     }
 }

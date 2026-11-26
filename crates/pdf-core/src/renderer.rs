@@ -1,5 +1,6 @@
 use crate::document::CoreError;
-use crate::types::{PageBox, SearchResult};
+use crate::types::{LinkDto, PageBox, SearchResult, TextSpanDto};
+use regex::RegexBuilder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::ImageEncoder;
 use lru::LruCache;
@@ -14,11 +15,11 @@ use std::thread::JoinHandle;
 
 static SHARED_PDFIUM: OnceLock<Result<Arc<Pdfium>, String>> = OnceLock::new();
 
-const RGBA_CACHE_MAX_BYTES: usize = 96 * 1024 * 1024;
+const RGBA_CACHE_MAX_BYTES: usize = 128 * 1024 * 1024;
 const RGBA_CACHE_MAX_ENTRY_BYTES: usize = 16 * 1024 * 1024;
-const RGBA_CACHE_MAX_ENTRIES: usize = 128;
+const RGBA_CACHE_MAX_ENTRIES: usize = 1024;
 const PNG_CACHE_MAX_BYTES: usize = 48 * 1024 * 1024;
-const PNG_CACHE_MAX_ENTRIES: usize = 96;
+const PNG_CACHE_MAX_ENTRIES: usize = 256;
 
 #[derive(Clone)]
 pub struct RawBitmap {
@@ -29,15 +30,16 @@ pub struct RawBitmap {
 }
 
 impl RawBitmap {
-    pub fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Self {
-        let mut frame = Vec::with_capacity(8 + rgba.len());
-        frame.extend_from_slice(&width.to_le_bytes());
-        frame.extend_from_slice(&height.to_le_bytes());
-        frame.extend_from_slice(&rgba);
+    pub fn from_rgba(width: u32, height: u32, mut rgba: Vec<u8>) -> Self {
+        let len = rgba.len();
+        rgba.resize(len + 8, 0);
+        rgba.copy_within(0..len, 8);
+        rgba[0..4].copy_from_slice(&width.to_le_bytes());
+        rgba[4..8].copy_from_slice(&height.to_le_bytes());
         Self {
             width,
             height,
-            frame,
+            frame: rgba,
         }
     }
 
@@ -129,10 +131,32 @@ enum ActorRequest {
         password: Option<String>,
         reply: mpsc::SyncSender<Result<String, CoreError>>,
     },
+    ExtractTextSpans {
+        source_id: u64,
+        bytes: Arc<Vec<u8>>,
+        page_index: usize,
+        password: Option<String>,
+        reply: mpsc::SyncSender<Result<Vec<TextSpanDto>, CoreError>>,
+    },
+    ExtractLinks {
+        source_id: u64,
+        bytes: Arc<Vec<u8>>,
+        page_index: usize,
+        password: Option<String>,
+        reply: mpsc::SyncSender<Result<Vec<LinkDto>, CoreError>>,
+    },
     Search {
         source_id: u64,
         bytes: Arc<Vec<u8>>,
         query: String,
+        case_sensitive: bool,
+        password: Option<String>,
+        reply: mpsc::SyncSender<Result<Vec<SearchResult>, CoreError>>,
+    },
+    SearchRegex {
+        source_id: u64,
+        bytes: Arc<Vec<u8>>,
+        pattern: String,
         case_sensitive: bool,
         password: Option<String>,
         reply: mpsc::SyncSender<Result<Vec<SearchResult>, CoreError>>,
@@ -187,16 +211,10 @@ fn ensure_open_doc<'a, 'b>(
     Ok(&cached.as_ref().unwrap().doc)
 }
 
-fn render_rgba_vec_from_doc(
-    doc: &PdfDocument<'_>,
-    page_index: usize,
+fn render_rgba_vec_from_page(
+    page: &PdfPage<'_>,
     target_width: u32,
 ) -> Result<(u32, u32, Vec<u8>), CoreError> {
-    let page = doc
-        .pages()
-        .get(page_index as i32)
-        .map_err(|e| CoreError::Pdfium(e.to_string()))?;
-
     let render_config = PdfRenderConfig::new()
         .set_target_width(target_width.max(1) as i32)
         .set_clear_color(PdfColor::WHITE);
@@ -209,6 +227,18 @@ fn render_rgba_vec_from_doc(
     let rgba = bitmap.as_rgba_bytes();
 
     Ok((width, height, rgba))
+}
+
+fn render_rgba_vec_from_doc(
+    doc: &PdfDocument<'_>,
+    page_index: usize,
+    target_width: u32,
+) -> Result<(u32, u32, Vec<u8>), CoreError> {
+    let page = doc
+        .pages()
+        .get(page_index as i32)
+        .map_err(|e| CoreError::Pdfium(e.to_string()))?;
+    render_rgba_vec_from_page(&page, target_width)
 }
 
 fn render_bitmap_from_doc(
@@ -275,8 +305,8 @@ fn run_pdfium_actor(pdfium: Arc<Pdfium>, rx: mpsc::Receiver<ActorRequest>) {
                         let target_width = ((width_pt / 72.0) * dpi as f32)
                             .round()
                             .clamp(1.0, 16384.0) as u32;
-                        let bmp = render_bitmap_from_doc(doc, page_index, target_width)?;
-                        out.push((page_index, bmp));
+                        let (w, h, rgba) = render_rgba_vec_from_page(&page, target_width)?;
+                        out.push((page_index, RawBitmap::from_rgba(w, h, rgba)));
                     }
                     Ok(out)
                 });
@@ -303,6 +333,53 @@ fn run_pdfium_actor(pdfium: Arc<Pdfium>, rx: mpsc::Receiver<ActorRequest>) {
                         .map_err(|e| CoreError::Pdfium(e.to_string()))?;
                     let text_page = page.text().map_err(|e| CoreError::Pdfium(e.to_string()))?;
                     Ok(text_page.all())
+                });
+                let _ = reply.send(res);
+            }
+            ActorRequest::ExtractTextSpans {
+                source_id,
+                bytes,
+                page_index,
+                password,
+                reply,
+            } => {
+                let res = ensure_open_doc(
+                    &pdfium,
+                    &mut cached,
+                    source_id,
+                    &bytes,
+                    password.as_deref(),
+                )
+                .and_then(|doc| {
+                    let page = doc
+                        .pages()
+                        .get(page_index as i32)
+                        .map_err(|e| CoreError::Pdfium(e.to_string()))?;
+                    let text_page = page.text().map_err(|e| CoreError::Pdfium(e.to_string()))?;
+                    Ok(extract_text_spans_from_page(&text_page))
+                });
+                let _ = reply.send(res);
+            }
+            ActorRequest::ExtractLinks {
+                source_id,
+                bytes,
+                page_index,
+                password,
+                reply,
+            } => {
+                let res = ensure_open_doc(
+                    &pdfium,
+                    &mut cached,
+                    source_id,
+                    &bytes,
+                    password.as_deref(),
+                )
+                .and_then(|doc| {
+                    let page = doc
+                        .pages()
+                        .get(page_index as i32)
+                        .map_err(|e| CoreError::Pdfium(e.to_string()))?;
+                    Ok(extract_links_from_page(&page))
                 });
                 let _ = reply.send(res);
             }
@@ -349,6 +426,35 @@ fn run_pdfium_actor(pdfium: Arc<Pdfium>, rx: mpsc::Receiver<ActorRequest>) {
                     }
                     results
                 });
+                let _ = reply.send(res);
+            }
+            ActorRequest::SearchRegex {
+                source_id,
+                bytes,
+                pattern,
+                case_sensitive,
+                password,
+                reply,
+            } => {
+                let res = RegexBuilder::new(&pattern)
+                    .case_insensitive(!case_sensitive)
+                    .build()
+                    .map_err(|e| CoreError::InvalidOperation(format!("Invalid regex: {}", e)))
+                    .and_then(|re| {
+                        let doc = ensure_open_doc(
+                            &pdfium,
+                            &mut cached,
+                            source_id,
+                            &bytes,
+                            password.as_deref(),
+                        )?;
+                        let mut results = Vec::new();
+                        for (page_index, page) in doc.pages().iter().enumerate() {
+                            let Ok(text_page) = page.text() else { continue };
+                            results.extend(search_regex_on_page(&text_page, page_index, &re));
+                        }
+                        Ok(results)
+                    });
                 let _ = reply.send(res);
             }
             ActorRequest::DetectCropMargins {
@@ -432,31 +538,41 @@ fn scan_crop_margins(bmp: &RawBitmap, page_width: f64, page_height: f64) -> Page
     PageBox::new(x1, y1, (x2 - x1).max(1.0), (y2 - y1).max(1.0))
 }
 
-pub fn encode_png_fast(bitmap: &RawBitmap) -> Result<Vec<u8>, CoreError> {
-    let rgba = bitmap.rgba();
+pub fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, CoreError> {
     let mut png_bytes = Vec::with_capacity((rgba.len() / 4).max(1024));
     let encoder =
         PngEncoder::new_with_quality(&mut png_bytes, CompressionType::Fast, FilterType::Sub);
     encoder
-        .write_image(
-            rgba,
-            bitmap.width,
-            bitmap.height,
-            image::ExtendedColorType::Rgba8,
-        )
+        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
         .map_err(|e| CoreError::Pdfium(e.to_string()))?;
     Ok(png_bytes)
+}
+
+pub fn encode_png_fast(bitmap: &RawBitmap) -> Result<Vec<u8>, CoreError> {
+    encode_png_rgba(bitmap.width, bitmap.height, bitmap.rgba())
 }
 
 pub fn encode_rgba_frame(bitmap: &RawBitmap) -> Vec<u8> {
     bitmap.frame.clone()
 }
 
+fn pdf_bytes_fingerprint(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.len().hash(&mut hasher);
+    let head = &bytes[..bytes.len().min(1024)];
+    head.hash(&mut hasher);
+    if bytes.len() > 1024 {
+        bytes[bytes.len() - 1024..].hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 pub struct PdfRenderer {
     actor_tx: Mutex<Option<Sender<ActorRequest>>>,
     actor_handle: Mutex<Option<JoinHandle<()>>>,
     rgba_cache: Mutex<ByteBoundedCache<(u64, u64, u64, u32), RawBitmap>>,
-    png_cache: Mutex<ByteBoundedCache<(usize, u32, u64), Vec<u8>>>,
+    png_cache: Mutex<ByteBoundedCache<(u64, usize, u32, u64), Vec<u8>>>,
 }
 
 impl Drop for PdfRenderer {
@@ -604,7 +720,7 @@ impl PdfRenderer {
         Ok(RawBitmap::from_rgba(width, height, rgba))
     }
 
-    /// Renders a single page with caching keyed by (page_index, scale_bucket, rev_id).
+    /// Renders a single page with caching keyed by (doc_fingerprint, page_index, target_width, rev_id).
     pub fn render_page_cached(
         &self,
         pdf_bytes: &[u8],
@@ -613,18 +729,20 @@ impl PdfRenderer {
         revision_id: u64,
         password: Option<&str>,
     ) -> Result<Vec<u8>, CoreError> {
-        let cache_key = (page_index, target_width, revision_id);
+        let doc_fp = pdf_bytes_fingerprint(pdf_bytes);
+        let cache_key = (doc_fp, page_index, target_width, revision_id);
         if let Some(cached) = self.png_cache.lock().get(&cache_key) {
             return Ok((*cached).clone());
         }
 
         let rendered = self.render_page_raw(pdf_bytes, page_index, target_width, password)?;
         let len = rendered.len();
+        let arc_rendered = Arc::new(rendered);
         self.png_cache
             .lock()
-            .insert(cache_key, Arc::new(rendered.clone()), len);
+            .insert(cache_key, Arc::clone(&arc_rendered), len);
 
-        Ok(rendered)
+        Ok((*arc_rendered).clone())
     }
 
     /// Renders a page directly to PNG byte stream.
@@ -636,8 +754,9 @@ impl PdfRenderer {
         password: Option<&str>,
     ) -> Result<Vec<u8>, CoreError> {
         let bytes = Arc::new(pdf_bytes.to_vec());
-        let bitmap = self.render_page_rgba_for_source(0, bytes, page_index, target_width, password)?;
-        encode_png_fast(&bitmap)
+        let (width, height, rgba) =
+            self.render_page_rgba_vec_for_source(0, bytes, page_index, target_width, password)?;
+        encode_png_rgba(width, height, &rgba)
     }
 
     /// Extracts all text from a page.
@@ -691,6 +810,63 @@ impl PdfRenderer {
             bytes: pdf_bytes,
             query,
             case_sensitive,
+            password: pw,
+            reply,
+        })
+    }
+
+    pub fn search_document_regex_arc(
+        &self,
+        source_id: u64,
+        pdf_bytes: Arc<Vec<u8>>,
+        pattern: &str,
+        case_sensitive: bool,
+        password: Option<&str>,
+    ) -> Result<Vec<SearchResult>, CoreError> {
+        if pattern.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let pattern = pattern.to_owned();
+        let pw = password.map(str::to_owned);
+        self.send_request(|reply| ActorRequest::SearchRegex {
+            source_id,
+            bytes: pdf_bytes,
+            pattern,
+            case_sensitive,
+            password: pw,
+            reply,
+        })
+    }
+
+    pub fn extract_page_text_spans_arc(
+        &self,
+        source_id: u64,
+        pdf_bytes: Arc<Vec<u8>>,
+        page_index: usize,
+        password: Option<&str>,
+    ) -> Result<Vec<TextSpanDto>, CoreError> {
+        let pw = password.map(str::to_owned);
+        self.send_request(|reply| ActorRequest::ExtractTextSpans {
+            source_id,
+            bytes: pdf_bytes,
+            page_index,
+            password: pw,
+            reply,
+        })
+    }
+
+    pub fn extract_page_links_arc(
+        &self,
+        source_id: u64,
+        pdf_bytes: Arc<Vec<u8>>,
+        page_index: usize,
+        password: Option<&str>,
+    ) -> Result<Vec<LinkDto>, CoreError> {
+        let pw = password.map(str::to_owned);
+        self.send_request(|reply| ActorRequest::ExtractLinks {
+            source_id,
+            bytes: pdf_bytes,
+            page_index,
             password: pw,
             reply,
         })
@@ -842,6 +1018,217 @@ impl PdfRenderer {
     }
 }
 
+fn extract_text_spans_from_page(text_page: &PdfPageText<'_>) -> Vec<TextSpanDto> {
+    let mut spans = Vec::new();
+    let mut cur_text = String::new();
+    let mut min_x = 0.0_f64;
+    let mut min_y = 0.0_f64;
+    let mut max_x = 0.0_f64;
+    let mut max_y = 0.0_f64;
+
+    let flush = |spans: &mut Vec<TextSpanDto>,
+                 text: &mut String,
+                 min_x: f64,
+                 min_y: f64,
+                 max_x: f64,
+                 max_y: f64| {
+        if !text.is_empty() {
+            spans.push(TextSpanDto {
+                text: std::mem::take(text),
+                rect: PageBox::new(
+                    min_x,
+                    min_y,
+                    (max_x - min_x).max(0.5),
+                    (max_y - min_y).max(1.0),
+                ),
+            });
+        }
+    };
+
+    for ch in text_page.chars().iter() {
+        let Some(c) = ch.unicode_char() else {
+            continue;
+        };
+        if c == '\r' || c == '\n' || c.is_control() || c.is_whitespace() {
+            flush(&mut spans, &mut cur_text, min_x, min_y, max_x, max_y);
+            continue;
+        }
+        let Ok(bounds) = ch.loose_bounds() else {
+            continue;
+        };
+        let x = f64::from(bounds.left().value);
+        let y = f64::from(bounds.bottom().value);
+        let w = f64::from(bounds.width().value).max(0.5);
+        let h = f64::from(bounds.height().value).max(1.0);
+        let x2 = x + w;
+        let y2 = y + h;
+
+        if cur_text.is_empty() {
+            cur_text.push(c);
+            min_x = x;
+            min_y = y;
+            max_x = x2;
+            max_y = y2;
+        } else {
+            let line_h = (max_y - min_y).max(h);
+            let same_line = (y - min_y).abs() <= line_h * 0.6;
+            let close_x = (x - max_x) <= line_h * 0.35 && x >= min_x - line_h * 0.25;
+            if same_line && close_x {
+                cur_text.push(c);
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x2);
+                max_y = max_y.max(y2);
+            } else {
+                flush(&mut spans, &mut cur_text, min_x, min_y, max_x, max_y);
+                cur_text.push(c);
+                min_x = x;
+                min_y = y;
+                max_x = x2;
+                max_y = y2;
+            }
+        }
+    }
+    flush(&mut spans, &mut cur_text, min_x, min_y, max_x, max_y);
+    spans
+}
+
+fn extract_links_from_page(page: &PdfPage<'_>) -> Vec<LinkDto> {
+    let mut links = Vec::new();
+    for link in page.links().iter() {
+        let Ok(rect) = link.rect() else {
+            continue;
+        };
+        let bbox = PageBox::new(
+            f64::from(rect.left().value),
+            f64::from(rect.bottom().value),
+            f64::from(rect.width().value),
+            f64::from(rect.height().value),
+        );
+        if bbox.width <= 0.0 || bbox.height <= 0.0 {
+            continue;
+        }
+
+        let mut uri: Option<String> = None;
+        let mut target_page: Option<usize> = None;
+
+        if let Some(action) = link.action() {
+            match action {
+                PdfAction::Uri(uri_action) => {
+                    if let Ok(u) = uri_action.uri() {
+                        let trimmed = u.trim().to_string();
+                        if !trimmed.is_empty() {
+                            uri = Some(trimmed);
+                        }
+                    }
+                }
+                PdfAction::LocalDestination(local) => {
+                    if let Ok(dest) = local.destination() {
+                        if let Ok(idx) = dest.page_index() {
+                            target_page = Some(idx as usize);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if uri.is_none() && target_page.is_none() {
+            if let Some(dest) = link.destination() {
+                if let Ok(idx) = dest.page_index() {
+                    target_page = Some(idx as usize);
+                }
+            }
+        }
+
+        if uri.is_some() || target_page.is_some() {
+            links.push(LinkDto {
+                rect: bbox,
+                uri,
+                target_page,
+            });
+        }
+    }
+    links
+}
+
+fn merge_boxes_by_line(boxes: &[PageBox]) -> Vec<PageBox> {
+    let mut merged: Vec<PageBox> = Vec::new();
+    for &b in boxes {
+        if let Some(last) = merged.last_mut() {
+            let line_h = last.height.max(b.height);
+            let same_line = (b.y - last.y).abs() <= line_h * 0.6;
+            if same_line {
+                let min_x = last.x.min(b.x);
+                let min_y = last.y.min(b.y);
+                let max_x = (last.x + last.width).max(b.x + b.width);
+                let max_y = (last.y + last.height).max(b.y + b.height);
+                *last = PageBox::new(min_x, min_y, max_x - min_x, max_y - min_y);
+                continue;
+            }
+        }
+        merged.push(b);
+    }
+    merged
+}
+
+fn search_regex_on_page(
+    text_page: &PdfPageText<'_>,
+    page_index: usize,
+    re: &regex::Regex,
+) -> Vec<SearchResult> {
+    let mut full_text = String::new();
+    let mut char_ranges: Vec<(usize, usize, Option<PageBox>)> = Vec::new();
+
+    for ch in text_page.chars().iter() {
+        let Some(c) = ch.unicode_char() else {
+            continue;
+        };
+        let start = full_text.len();
+        full_text.push(c);
+        let end = full_text.len();
+        let bbox = if c == '\r' || c == '\n' || c.is_control() {
+            None
+        } else {
+            ch.loose_bounds().ok().map(|b| {
+                PageBox::new(
+                    f64::from(b.left().value),
+                    f64::from(b.bottom().value),
+                    f64::from(b.width().value).max(0.5),
+                    f64::from(b.height().value).max(1.0),
+                )
+            })
+        };
+        char_ranges.push((start, end, bbox));
+    }
+
+    let mut results = Vec::new();
+    for m in re.find_iter(&full_text) {
+        if m.as_str().is_empty() {
+            continue;
+        }
+        let start_idx = char_ranges.partition_point(|&(_, end, _)| end <= m.start());
+        let mut boxes = Vec::new();
+        for &(s, _, bbox) in &char_ranges[start_idx..] {
+            if s >= m.end() {
+                break;
+            }
+            if let Some(b) = bbox {
+                boxes.push(b);
+            }
+        }
+        let bounding_boxes = merge_boxes_by_line(&boxes);
+        if !bounding_boxes.is_empty() {
+            results.push(SearchResult {
+                page_index,
+                match_text: m.as_str().to_string(),
+                bounding_boxes,
+            });
+        }
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -896,5 +1283,29 @@ mod tests {
         assert_eq!(p0.width, 400);
         assert_eq!(p1.width, 400);
         assert_eq!(p0.rgba().len(), (p0.width * p0.height * 4) as usize);
+    }
+
+    #[test]
+    fn rgba_cache_holds_500_thumbnails_without_entry_cap_eviction() {
+        let renderer = PdfRenderer::new().unwrap();
+        let thumb = Arc::new(RawBitmap::from_rgba(16, 16, vec![255u8; 16 * 16 * 4]));
+        for page_uid in 0..500u64 {
+            renderer.put_cached_rgba(1, page_uid, 1, 240, Arc::clone(&thumb));
+        }
+        assert!(renderer.get_cached_rgba(1, 0, 1, 240).is_some());
+        assert!(renderer.get_cached_rgba(1, 499, 1, 240).is_some());
+    }
+
+    #[test]
+    fn png_cache_separates_distinct_documents_with_same_revision() {
+        let mut d1 = DocumentState::new_blank(612.0, 792.0).unwrap();
+        let mut d2 = DocumentState::new_blank(400.0, 400.0).unwrap();
+        let b1 = d1.to_bytes().unwrap();
+        let b2 = d2.to_bytes().unwrap();
+        let renderer = PdfRenderer::new().unwrap();
+
+        let png1 = renderer.render_page_cached(&b1, 0, 200, 1, None).unwrap();
+        let png2 = renderer.render_page_cached(&b2, 0, 200, 1, None).unwrap();
+        assert_ne!(png1, png2);
     }
 }

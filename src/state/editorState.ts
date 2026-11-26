@@ -19,11 +19,15 @@ export const DEFAULT_PREFERENCES: EditorPreferences = {
   themeMode: "system",
   defaultViewMode: "continuous",
   defaultZoom: "100%",
+  defaultTool: "select",
   smoothZoom: false,
   animateViewTransitions: true,
   gridRadialFlyIn: false,
   reopenLastPdf: false,
+  showLinks: true,
+  showForms: true,
   gridColumns: 4,
+  zoomSensitivity: 1,
   cacheAllPages: false,
   units: "pt",
   author: "User",
@@ -60,6 +64,9 @@ class EditorState {
   activeSidebarTab: SidebarTab = "thumbnails";
   propertiesCollapsed: boolean = false;
   pendingRedactions: AreaRedactItem[] = [];
+  pendingScrollRestore: { scrollTop: number; scrollLeft: number } | null = null;
+  private lastScrollTop = 0;
+  private lastScrollLeft = 0;
   theme: "light" | "dark" =
     typeof document !== "undefined" && document.documentElement.dataset.theme === "dark" ? "dark" : "light";
   recentFiles: string[] = [];
@@ -177,7 +184,15 @@ class EditorState {
       this.zoomFitMode = "fit-page";
     } else {
       this.zoomFitMode = "custom";
-      this.zoom = 1.0;
+      let savedZoom = NaN;
+      try {
+        if (typeof localStorage !== "undefined") {
+          savedZoom = Number(localStorage.getItem("pdf_editor_zoom"));
+        }
+      } catch {
+        // Storage fallback
+      }
+      this.zoom = Number.isFinite(savedZoom) && savedZoom >= 0.1 && savedZoom <= 8.0 ? savedZoom : 1.0;
     }
   }
 
@@ -220,17 +235,86 @@ class EditorState {
     this.pendingRedactions = [];
     this.currentPage = 0;
     this.cropBox = null;
+    this.pendingScrollRestore = null;
+    this.lastScrollTop = 0;
+    this.lastScrollLeft = 0;
     if (doc) {
       this.viewMode = this.preferences.defaultViewMode;
+      this.activeTool = this.preferences.defaultTool ?? "select";
       this.applyDefaultZoom();
+      const restored = this.loadSessionSnapshot(doc.file_path);
+      if (restored) {
+        if (typeof restored.zoom === "number" && restored.zoom >= 0.1 && restored.zoom <= 8.0) {
+          this.zoom = restored.zoom;
+        }
+        if (restored.zoomFitMode === "custom" || restored.zoomFitMode === "fit-width" || restored.zoomFitMode === "fit-page") {
+          this.zoomFitMode = restored.zoomFitMode;
+        }
+        if (typeof restored.currentPage === "number" && restored.currentPage >= 0 && restored.currentPage < doc.page_count) {
+          this.currentPage = restored.currentPage;
+        }
+        if (restored.sidebarTab === "thumbnails" || restored.sidebarTab === "outline" || restored.sidebarTab === "annotations") {
+          this.activeSidebarTab = restored.sidebarTab;
+        }
+        if (typeof restored.scrollTop === "number" && typeof restored.scrollLeft === "number") {
+          this.lastScrollTop = restored.scrollTop;
+          this.lastScrollLeft = restored.scrollLeft;
+          this.pendingScrollRestore = { scrollTop: restored.scrollTop, scrollLeft: restored.scrollLeft };
+        }
+      }
     }
     if (this.activeTool === "crop") this.initCropBoxForCurrentPage();
 
     if (doc?.file_path) {
       this.addRecentFile(doc.file_path);
+      this.persistSessionSnapshot();
     } else {
       this.notify();
     }
+  }
+
+  saveSessionScroll(scrollTop: number, scrollLeft: number) {
+    this.lastScrollTop = Math.max(0, scrollTop);
+    this.lastScrollLeft = Math.max(0, scrollLeft);
+    this.persistSessionSnapshot();
+  }
+
+  private persistSessionSnapshot() {
+    if (!this.doc?.file_path || typeof localStorage === "undefined") return;
+    try {
+      localStorage.setItem("pdf_editor_session", JSON.stringify({
+        filePath: this.doc.file_path,
+        scrollTop: this.lastScrollTop,
+        scrollLeft: this.lastScrollLeft,
+        currentPage: this.currentPage,
+        zoom: this.zoom,
+        zoomFitMode: this.zoomFitMode,
+        sidebarTab: this.activeSidebarTab,
+      }));
+    } catch {
+      // Storage fallback
+    }
+  }
+
+  loadSessionSnapshot(filePath?: string | null): {
+    filePath: string;
+    scrollTop: number;
+    scrollLeft: number;
+    currentPage: number;
+    zoom: number;
+    zoomFitMode: ZoomFitMode;
+    sidebarTab: SidebarTab;
+  } | null {
+    if (!filePath || typeof localStorage === "undefined") return null;
+    try {
+      const raw = localStorage.getItem("pdf_editor_session");
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.filePath === filePath) return parsed;
+    } catch {
+      // Storage fallback
+    }
+    return null;
   }
 
   updateDocument(doc: DocumentDto) {
@@ -374,6 +458,7 @@ class EditorState {
     if (this.activeSidebarTab === tab) return;
     this.activeSidebarTab = tab;
     this.persistPreferences();
+    this.persistSessionSnapshot();
     this.notify();
   }
 
@@ -408,7 +493,13 @@ class EditorState {
     this.zoom = Math.min(8.0, Math.max(0.1, zoom));
     if (!keepFitMode) {
       this.zoomFitMode = "custom";
+      try {
+        localStorage.setItem("pdf_editor_zoom", String(this.zoom));
+      } catch {
+        // Storage fallback
+      }
     }
+    this.persistSessionSnapshot();
     this.notify();
   }
 

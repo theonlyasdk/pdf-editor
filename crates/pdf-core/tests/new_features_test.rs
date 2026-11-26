@@ -875,6 +875,7 @@ fn test_pdf_point_to_viewport_roundtrip_all_rotations() {
             height,
             media_box: PageBox::new(10.0, 20.0, 612.0, 792.0),
             crop_box: Some(visible),
+            label: None,
         };
         let original = Point2D { x: 123.5, y: 245.25 };
         let pdf_pt = page.viewport_point(original.x, original.y);
@@ -888,4 +889,226 @@ fn test_pdf_point_to_viewport_roundtrip_all_rotations() {
             original.y
         );
     }
+}
+
+#[test]
+fn test_extract_text_spans_and_regex_search_redact() {
+    let mut doc = make_text_pdf_doc(&[vec![
+        (72.0, 720.0, "Contact alice@example.com for details"),
+        (72.0, 690.0, "Ref ID-48291"),
+    ]]);
+    let bytes = std::sync::Arc::new(doc.to_bytes().unwrap());
+    let renderer = PdfRenderer::new().unwrap();
+
+    let spans = renderer
+        .extract_page_text_spans_arc(1, std::sync::Arc::clone(&bytes), 0, None)
+        .unwrap();
+    let joined: String = spans.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+    assert!(joined.contains("alice@example.com"), "spans: {joined}");
+    assert!(spans.iter().all(|s| s.rect.width > 0.0 && s.rect.height > 0.0));
+
+    let hits = renderer
+        .search_document_regex_arc(
+            1,
+            std::sync::Arc::clone(&bytes),
+            r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+            false,
+            None,
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].match_text, "alice@example.com");
+    assert!(!hits[0].bounding_boxes.is_empty());
+
+    // Bulk redact the regex match
+    let items: Vec<AreaRedactItem> = hits
+        .iter()
+        .flat_map(|h| {
+            h.bounding_boxes.iter().map(|&rect| AreaRedactItem {
+                page_index: h.page_index,
+                rect,
+            })
+        })
+        .collect();
+    pdf_core::redaction::apply_area_redactions(&mut doc, &items).unwrap();
+    let redacted_bytes = doc.to_bytes().unwrap();
+    let after_text = renderer.extract_page_text(&redacted_bytes, 0, None).unwrap();
+    assert!(!after_text.contains("alice@example.com"));
+}
+
+#[test]
+fn test_editable_outline_command_and_undo_redo() {
+    let mut doc = DocumentState::new_blank(612.0, 792.0).unwrap();
+    doc.insert_blank_page(1, 612.0, 792.0).unwrap();
+    let mut cmd_mgr = CommandManager::new();
+
+    let new_outline = vec![
+        OutlineItem {
+            title: "Chapter 1".to_string(),
+            page_index: Some(0),
+            children: vec![OutlineItem {
+                title: "Section 1.1 — Café".to_string(),
+                page_index: Some(1),
+                children: vec![],
+            }],
+        },
+        OutlineItem {
+            title: "Appendix".to_string(),
+            page_index: Some(1),
+            children: vec![],
+        },
+    ];
+
+    cmd_mgr
+        .execute(
+            &mut doc,
+            Box::new(UpdateOutlineCommand {
+                previous_outline: vec![],
+                new_outline: new_outline.clone(),
+            }),
+        )
+        .unwrap();
+    assert_eq!(doc.get_outline().unwrap(), new_outline);
+
+    // Roundtrip through PDF bytes
+    let reloaded = DocumentState::from_bytes(&doc.to_bytes().unwrap()).unwrap();
+    assert_eq!(reloaded.get_outline().unwrap(), new_outline);
+
+    cmd_mgr.undo(&mut doc).unwrap();
+    assert!(doc.get_outline().unwrap().is_empty());
+
+    cmd_mgr.redo(&mut doc).unwrap();
+    assert_eq!(doc.get_outline().unwrap(), new_outline);
+}
+
+#[test]
+fn test_acroform_read_edit_undo_and_flatten() {
+    let mut doc_state = DocumentState::new_blank(612.0, 792.0).unwrap();
+    let page_id = doc_state.get_page_id(0).unwrap();
+
+    let text_field_id = doc_state.doc.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "FT" => "Tx",
+        "T" => Object::string_literal("full_name"),
+        "V" => Object::string_literal("Initial"),
+        "Rect" => vec![72.into(), 700.into(), 272.into(), 724.into()],
+        "P" => page_id,
+    });
+    let check_field_id = doc_state.doc.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "FT" => "Btn",
+        "T" => Object::string_literal("agree"),
+        "V" => Object::Name(b"Off".to_vec()),
+        "AS" => Object::Name(b"Off".to_vec()),
+        "Rect" => vec![72.into(), 660.into(), 90.into(), 678.into()],
+        "P" => page_id,
+    });
+    let dropdown_id = doc_state.doc.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Widget",
+        "FT" => "Ch",
+        "Ff" => 1 << 17,
+        "T" => Object::string_literal("country"),
+        "Opt" => vec![Object::string_literal("US"), Object::string_literal("CA")],
+        "V" => Object::string_literal("US"),
+        "Rect" => vec![72.into(), 620.into(), 200.into(), 642.into()],
+        "P" => page_id,
+    });
+
+    doc_state
+        .doc
+        .get_dictionary_mut(page_id)
+        .unwrap()
+        .set("Annots", vec![text_field_id.into(), check_field_id.into(), dropdown_id.into()]);
+    let root_id = doc_state.doc.trailer.get(b"Root").unwrap().as_reference().unwrap();
+    doc_state.doc.get_dictionary_mut(root_id).unwrap().set(
+        "AcroForm",
+        dictionary! {
+            "Fields" => vec![text_field_id.into(), check_field_id.into(), dropdown_id.into()],
+        },
+    );
+
+    let fields = pdf_core::forms::extract_form_fields(&doc_state).unwrap();
+    assert_eq!(fields.len(), 3);
+    assert_eq!(fields[0].field_type, FormFieldType::Text);
+    assert_eq!(fields[0].value, "Initial");
+    assert_eq!(fields[1].field_type, FormFieldType::Checkbox);
+    assert_eq!(fields[1].value, "false");
+    assert_eq!(fields[2].field_type, FormFieldType::Dropdown);
+    assert_eq!(fields[2].options, vec!["US", "CA"]);
+
+    let mut cmd_mgr = CommandManager::new();
+    cmd_mgr
+        .execute(
+            &mut doc_state,
+            Box::new(SetFormFieldCommand {
+                field_id: fields[0].id.clone(),
+                old_value: "Initial".to_string(),
+                new_value: "Jane Doe".to_string(),
+                page_index: 0,
+            }),
+        )
+        .unwrap();
+    cmd_mgr
+        .execute(
+            &mut doc_state,
+            Box::new(SetFormFieldCommand {
+                field_id: fields[1].id.clone(),
+                old_value: "false".to_string(),
+                new_value: "true".to_string(),
+                page_index: 0,
+            }),
+        )
+        .unwrap();
+
+    let updated = pdf_core::forms::extract_form_fields(&doc_state).unwrap();
+    assert_eq!(updated[0].value, "Jane Doe");
+    assert_eq!(updated[1].value, "true");
+
+    cmd_mgr.undo(&mut doc_state).unwrap();
+    let after_undo = pdf_core::forms::extract_form_fields(&doc_state).unwrap();
+    assert_eq!(after_undo[1].value, "false");
+
+    let affected = pdf_core::forms::flatten_form_fields(&mut doc_state).unwrap();
+    assert_eq!(affected, vec![0]);
+    assert!(pdf_core::forms::extract_form_fields(&doc_state).unwrap().is_empty());
+}
+
+#[test]
+fn test_extract_page_links_internal_and_uri() {
+    let mut doc_state = DocumentState::new_blank(612.0, 792.0).unwrap();
+    doc_state.insert_blank_page(1, 612.0, 792.0).unwrap();
+    let p0 = doc_state.get_page_id(0).unwrap();
+    let p1 = doc_state.get_page_id(1).unwrap();
+
+    let uri_action = doc_state.doc.add_object(dictionary! {
+        "S" => "URI",
+        "URI" => Object::string_literal("https://example.com/docs"),
+    });
+    let uri_link = doc_state.doc.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Link",
+        "Rect" => vec![72.into(), 700.into(), 200.into(), 720.into()],
+        "A" => uri_action,
+    });
+    let goto_link = doc_state.doc.add_object(dictionary! {
+        "Type" => "Annot",
+        "Subtype" => "Link",
+        "Rect" => vec![72.into(), 660.into(), 200.into(), 680.into()],
+        "Dest" => vec![p1.into(), Object::Name(b"Fit".to_vec())],
+    });
+    doc_state
+        .doc
+        .get_dictionary_mut(p0)
+        .unwrap()
+        .set("Annots", vec![uri_link.into(), goto_link.into()]);
+
+    let bytes = std::sync::Arc::new(doc_state.to_bytes().unwrap());
+    let renderer = PdfRenderer::new().unwrap();
+    let links = renderer.extract_page_links_arc(1, bytes, 0, None).unwrap();
+    assert_eq!(links.len(), 2);
+    assert!(links.iter().any(|l| l.uri.as_deref() == Some("https://example.com/docs")));
+    assert!(links.iter().any(|l| l.target_page == Some(1)));
 }

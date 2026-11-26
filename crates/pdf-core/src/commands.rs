@@ -635,3 +635,53 @@ impl DocumentCommand for MergePdfCommand {
         format!("Merge {} PDF(s)", self.paths.len())
     }
 }
+
+pub struct UpdateOutlineCommand {
+    pub previous_outline: Vec<crate::types::OutlineItem>,
+    pub new_outline: Vec<crate::types::OutlineItem>,
+}
+
+impl DocumentCommand for UpdateOutlineCommand {
+    fn execute(&mut self, doc: &mut DocumentState) -> Result<(), CoreError> {
+        doc.set_outline(&self.new_outline)
+    }
+
+    fn undo(&mut self, doc: &mut DocumentState) -> Result<(), CoreError> {
+        doc.set_outline(&self.previous_outline)
+    }
+
+    fn description(&self) -> String {
+        "Update Bookmarks".to_string()
+    }
+
+    fn render_effect(&self) -> CommandRenderEffect {
+        CommandRenderEffect::None
+    }
+}
+
+pub struct SetFormFieldCommand {
+    pub field_id: String,
+    pub old_value: String,
+    pub new_value: String,
+    pub page_index: usize,
+}
+
+impl DocumentCommand for SetFormFieldCommand {
+    fn execute(&mut self, doc: &mut DocumentState) -> Result<(), CoreError> {
+        self.page_index = crate::forms::set_form_field_value(doc, &self.field_id, &self.new_value)?;
+        Ok(())
+    }
+
+    fn undo(&mut self, doc: &mut DocumentState) -> Result<(), CoreError> {
+        crate::forms::set_form_field_value(doc, &self.field_id, &self.old_value)?;
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        "Edit Form Field".to_string()
+    }
+
+    fn render_effect(&self) -> CommandRenderEffect {
+        CommandRenderEffect::Pages(vec![self.page_index])
+    }
+}

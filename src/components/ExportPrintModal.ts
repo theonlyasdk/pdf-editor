@@ -5,6 +5,7 @@ import { editorState } from "../state/editorState";
 import { createRangePreviewer, PageScopeMode, resolvePageSelection } from "./MergeSplitModal";
 import { toast } from "./Toast";
 import { icon } from "./ui/icon";
+import { animateDialogSize, initSlidingTabs } from "./ui/modalMotion";
 import "../styles/doc-tools.css";
 
 export type ExportImageFormat = "png" | "jpeg";
@@ -37,6 +38,7 @@ export class ExportPrintModalView {
   private primaryBtn: HTMLButtonElement;
 
   private activeTab: "export" | "print" = "export";
+  private slidingTabs: ReturnType<typeof initSlidingTabs>;
   private format: ExportImageFormat = "png";
   private dpi: ExportDpi = 150;
   private rangePreviewer: ReturnType<typeof createRangePreviewer>;
@@ -142,6 +144,7 @@ export class ExportPrintModalView {
 
     this.tabExportBtn = this.dialog.querySelector("#ep-tab-export")!;
     this.tabPrintBtn = this.dialog.querySelector("#ep-tab-print")!;
+    this.slidingTabs = initSlidingTabs(this.dialog.querySelector(".doc-modal-tabs")!, ".doc-modal-tab");
     this.exportOptionsWrap = this.dialog.querySelector("#ep-panel-export")!;
     this.printOptionsWrap = this.dialog.querySelector("#ep-panel-print")!;
     this.scopeSelect = this.dialog.querySelector("#ep-scope")!;
@@ -276,12 +279,17 @@ export class ExportPrintModalView {
   private switchTab(tab: "export" | "print") {
     this.activeTab = tab;
     const isExport = tab === "export";
-    this.tabExportBtn.setAttribute("aria-selected", String(isExport));
-    this.tabPrintBtn.setAttribute("aria-selected", String(!isExport));
-    this.exportOptionsWrap.hidden = !isExport;
-    this.printOptionsWrap.hidden = isExport;
-    this.primaryBtn.textContent = isExport ? "Export images" : "Print...";
-    this.setError(null);
+    const apply = () => {
+      this.tabExportBtn.setAttribute("aria-selected", String(isExport));
+      this.tabPrintBtn.setAttribute("aria-selected", String(!isExport));
+      this.exportOptionsWrap.hidden = !isExport;
+      this.printOptionsWrap.hidden = isExport;
+      this.primaryBtn.textContent = isExport ? "Export images" : "Print...";
+      this.setError(null);
+    };
+    if (this.dialog.open) animateDialogSize(this.dialog, apply);
+    else apply();
+    this.slidingTabs.update(!this.dialog.open);
   }
 
   private setFormat(fmt: ExportImageFormat) {

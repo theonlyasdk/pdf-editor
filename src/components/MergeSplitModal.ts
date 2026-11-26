@@ -4,6 +4,7 @@ import { Backend } from "../ipc/backend";
 import { editorState } from "../state/editorState";
 import { toast } from "./Toast";
 import { icon } from "./ui/icon";
+import { animateDialogSize, initSlidingTabs } from "./ui/modalMotion";
 import "../styles/doc-tools.css";
 
 export type PageScopeMode = "all" | "current" | "selected" | "range";
@@ -135,6 +136,7 @@ export class MergeSplitModalView {
   private primaryBtn: HTMLButtonElement;
 
   private activeTab: "merge" | "extract" = "merge";
+  private slidingTabs: ReturnType<typeof initSlidingTabs>;
   private mergePaths: string[] = [];
   private rangePreviewer: ReturnType<typeof createRangePreviewer>;
   private focusReturn: HTMLElement | null = null;
@@ -229,6 +231,7 @@ export class MergeSplitModalView {
 
     this.tabMergeBtn = this.dialog.querySelector("#ms-tab-merge")!;
     this.tabExtractBtn = this.dialog.querySelector("#ms-tab-extract")!;
+    this.slidingTabs = initSlidingTabs(this.dialog.querySelector(".doc-modal-tabs")!, ".doc-modal-tab");
     this.mergePanel = this.dialog.querySelector("#ms-panel-merge")!;
     this.extractPanel = this.dialog.querySelector("#ms-panel-extract")!;
     this.fileListEl = this.dialog.querySelector("#ms-file-list")!;
@@ -366,12 +369,17 @@ export class MergeSplitModalView {
   private switchTab(tab: "merge" | "extract") {
     this.activeTab = tab;
     const isMerge = tab === "merge";
-    this.tabMergeBtn.setAttribute("aria-selected", String(isMerge));
-    this.tabExtractBtn.setAttribute("aria-selected", String(!isMerge));
-    this.mergePanel.hidden = !isMerge;
-    this.extractPanel.hidden = isMerge;
-    this.primaryBtn.textContent = isMerge ? "Merge PDFs" : "Extract to PDF...";
-    this.setError(null);
+    const apply = () => {
+      this.tabMergeBtn.setAttribute("aria-selected", String(isMerge));
+      this.tabExtractBtn.setAttribute("aria-selected", String(!isMerge));
+      this.mergePanel.hidden = !isMerge;
+      this.extractPanel.hidden = isMerge;
+      this.primaryBtn.textContent = isMerge ? "Merge PDFs" : "Extract to PDF...";
+      this.setError(null);
+    };
+    if (this.dialog.open) animateDialogSize(this.dialog, apply);
+    else apply();
+    this.slidingTabs.update(!this.dialog.open);
   }
 
   private renderMergeFileList() {

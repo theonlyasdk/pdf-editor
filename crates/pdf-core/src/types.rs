@@ -67,6 +67,8 @@ pub struct PageInfo {
     pub rotation: i32,
     pub media_box: PageBox,
     pub crop_box: Option<PageBox>,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 impl PageInfo {
@@ -304,4 +306,43 @@ pub struct SearchResult {
     pub page_index: usize,
     pub match_text: String,
     pub bounding_boxes: Vec<PageBox>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextSpanDto {
+    pub text: String,
+    pub rect: PageBox,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkDto {
+    pub rect: PageBox,
+    pub uri: Option<String>,
+    pub target_page: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FormFieldType {
+    Text,
+    Checkbox,
+    Radio,
+    Dropdown,
+    Listbox,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormFieldDto {
+    pub id: String,
+    pub name: String,
+    pub field_type: FormFieldType,
+    pub page_index: usize,
+    pub rect: PageBox,
+    pub value: String,
+    pub export_value: Option<String>,
+    pub options: Vec<String>,
+    pub multiline: bool,
+    pub read_only: bool,
+    pub max_len: Option<usize>,
+    pub font_size: Option<f64>,
 }

@@ -14,6 +14,7 @@ import {
 import { clearPendingPlacement, getPendingPlacement } from "./SignatureModal";
 import { toast } from "./Toast";
 import { icon } from "./ui/icon";
+import { bindEditableSliderValue } from "./ui/modalMotion";
 
 type ExtendedBackend = typeof Backend & {
   updateAnnotation(annotation: AnnotationDto): Promise<DocumentDto>;
@@ -62,12 +63,31 @@ function formatDateDisplay(iso?: string | null): string {
   });
 }
 
+function renderColorSwatches(inputId: string, color: string, presets = RECENT_COLORS, disabled = false): string {
+  const norm = normalizeHexColor(color);
+  return `
+    <div class="color-presets">
+      ${presets
+        .map(
+          (c) =>
+            `<div class="color-swatch ${c.toLowerCase() === norm ? "active" : ""}" style="background:${c}" data-color="${c}"></div>`,
+        )
+        .join("")}
+      <label class="color-swatch color-swatch--custom ${!presets.some((c) => c.toLowerCase() === norm) ? "active" : ""}" title="Custom color (${norm})">
+        <span class="color-swatch--custom-inner" style="background:${norm}"></span>
+        <input type="color" id="${inputId}" value="${norm}" ${disabled ? "disabled" : ""} aria-label="Custom color" />
+      </label>
+    </div>
+  `;
+}
+
 export class PropertiesPanelView {
   private element: HTMLElement;
   private contentEl: HTMLElement;
   private resizerEl: HTMLElement;
   private committingCropFields = false;
   private cropScope = "current";
+  private formFieldCount = 0;
 
   constructor(element: HTMLElement) {
     this.element = element;
@@ -90,6 +110,13 @@ export class PropertiesPanelView {
     editorState.subscribe(() => this.render());
     window.addEventListener("pending-placement-changed", () => {
       if (editorState.activeTool === "stamp") this.render();
+    });
+    window.addEventListener("form-fields-updated", (e) => {
+      const count = (e as CustomEvent<number>).detail ?? 0;
+      if (count !== this.formFieldCount) {
+        this.formFieldCount = count;
+        this.render();
+      }
     });
   }
 
@@ -174,70 +201,81 @@ export class PropertiesPanelView {
     } else if (tool === "pen" || tool === "highlighter") {
       bodyHtml = `
         <div class="property-group">
-          <label class="property-label">${STRINGS.properties.strokeColor}</label>
-          <div class="flex items-center gap-2">
-            <input type="color" class="ui-input ui-color" id="prop-stroke-color" value="${settings.strokeColor}" />
-            <span class="tabular-nums text-xs">${settings.strokeColor}</span>
+          <div class="flex items-center justify-between">
+            <label class="property-label mb-0">${STRINGS.properties.strokeColor}</label>
+            <span class="tabular-nums text-xs text-muted-foreground">${normalizeHexColor(settings.strokeColor)}</span>
           </div>
-          <div class="color-presets mt-1">
-            ${RECENT_COLORS.map(
-              (c) => `<div class="color-swatch ${c === settings.strokeColor ? "active" : ""}" style="background:${c}" data-color="${c}"></div>`,
-            ).join("")}
-          </div>
+          ${renderColorSwatches("prop-stroke-color", settings.strokeColor)}
         </div>
 
         <div class="property-group">
-          <label class="property-label">${STRINGS.properties.strokeWidth}: <span id="prop-stroke-val">${settings.strokeWidth}px</span></label>
+          <div class="flex items-center justify-between">
+            <label class="property-label mb-0">${STRINGS.properties.strokeWidth}</label>
+            <span class="text-xs font-medium" id="prop-stroke-val">${settings.strokeWidth}px</span>
+          </div>
           <input type="range" class="ui-slider" id="prop-stroke-width" min="1" max="24" value="${settings.strokeWidth}" />
         </div>
 
         <div class="property-group">
-          <label class="property-label">${STRINGS.properties.opacity}: <span id="prop-opacity-val">${Math.round(settings.opacity * 100)}%</span></label>
+          <div class="flex items-center justify-between">
+            <label class="property-label mb-0">${STRINGS.properties.opacity}</label>
+            <span class="text-xs font-medium" id="prop-opacity-val">${Math.round(settings.opacity * 100)}%</span>
+          </div>
           <input type="range" class="ui-slider" id="prop-opacity" min="0.1" max="1" step="0.05" value="${settings.opacity}" />
         </div>
       `;
     } else if (tool === "rectangle" || tool === "circle" || tool === "line" || tool === "arrow") {
       bodyHtml = `
         <div class="property-group">
-          <label class="property-label">${STRINGS.properties.strokeColor}</label>
-          <input type="color" class="ui-input ui-color" id="prop-stroke-color" value="${settings.strokeColor}" />
-          <div class="color-presets mt-1">
-            ${RECENT_COLORS.map(
-              (c) => `<div class="color-swatch ${c === settings.strokeColor ? "active" : ""}" style="background:${c}" data-color="${c}"></div>`,
-            ).join("")}
+          <div class="flex items-center justify-between">
+            <label class="property-label mb-0">${STRINGS.properties.strokeColor}</label>
+            <span class="tabular-nums text-xs text-muted-foreground">${normalizeHexColor(settings.strokeColor)}</span>
           </div>
+          ${renderColorSwatches("prop-stroke-color", settings.strokeColor)}
         </div>
 
         <div class="property-group">
-          <label class="property-label">${STRINGS.properties.fillColor}</label>
-          <div class="flex items-center gap-2">
-            <input type="color" class="ui-input ui-color" id="prop-fill-color" value="${settings.fillColor || "#ffffff"}" />
+          <div class="flex items-center justify-between">
+            <label class="property-label mb-0">${STRINGS.properties.fillColor}</label>
             <div class="ui-check mb-0">
               <input class="" type="checkbox" id="prop-fill-transparent" ${!settings.fillColor ? "checked" : ""} />
               <label class="text-xs" for="prop-fill-transparent">Transparent</label>
             </div>
           </div>
+          ${renderColorSwatches("prop-fill-color", settings.fillColor || "#ffffff")}
         </div>
 
         <div class="property-group">
-          <label class="property-label">${STRINGS.properties.strokeWidth}: <span id="prop-stroke-val">${settings.strokeWidth}px</span></label>
+          <div class="flex items-center justify-between">
+            <label class="property-label mb-0">${STRINGS.properties.strokeWidth}</label>
+            <span class="text-xs font-medium" id="prop-stroke-val">${settings.strokeWidth}px</span>
+          </div>
           <input type="range" class="ui-slider" id="prop-stroke-width" min="1" max="20" value="${settings.strokeWidth}" />
         </div>
 
         <div class="property-group">
-          <label class="property-label">${STRINGS.properties.opacity}: <span id="prop-opacity-val">${Math.round(settings.opacity * 100)}%</span></label>
+          <div class="flex items-center justify-between">
+            <label class="property-label mb-0">${STRINGS.properties.opacity}</label>
+            <span class="text-xs font-medium" id="prop-opacity-val">${Math.round(settings.opacity * 100)}%</span>
+          </div>
           <input type="range" class="ui-slider" id="prop-opacity" min="0.1" max="1" step="0.05" value="${settings.opacity}" />
         </div>
       `;
     } else if (tool === "freeText") {
       bodyHtml = `
         <div class="property-group">
-          <label class="property-label">Text Color</label>
-          <input type="color" class="ui-input ui-color" id="prop-stroke-color" value="${settings.strokeColor}" />
+          <div class="flex items-center justify-between">
+            <label class="property-label mb-0">Text Color</label>
+            <span class="tabular-nums text-xs text-muted-foreground">${normalizeHexColor(settings.strokeColor)}</span>
+          </div>
+          ${renderColorSwatches("prop-stroke-color", settings.strokeColor)}
         </div>
 
         <div class="property-group">
-          <label class="property-label">${STRINGS.properties.fontSize}: <span id="prop-font-size-val">${settings.fontSize}pt</span></label>
+          <div class="flex items-center justify-between">
+            <label class="property-label mb-0">${STRINGS.properties.fontSize}</label>
+            <span class="text-xs font-medium" id="prop-font-size-val">${settings.fontSize}pt</span>
+          </div>
           <input type="range" class="ui-slider" id="prop-font-size" min="8" max="72" value="${settings.fontSize}" />
         </div>
 
@@ -466,6 +504,17 @@ export class PropertiesPanelView {
     } else {
       bodyHtml = `
         <p class="properties-empty">${STRINGS.properties.noSelection}</p>
+        ${
+          this.formFieldCount > 0
+            ? `<div class="property-group mt-2">
+                <label class="property-label">Interactive Form (${this.formFieldCount})</label>
+                <p class="text-xs text-muted-foreground">Fill fields directly on the page, or flatten them permanently into page content.</p>
+                <button type="button" class="ui-button ui-button--outline ui-button--sm mt-1" id="btn-flatten-forms">
+                  Flatten Form Fields
+                </button>
+              </div>`
+            : ""
+        }
       `;
     }
 
@@ -657,20 +706,29 @@ export class PropertiesPanelView {
 
     // Stroke width slider
     const strokeSlider = this.element.querySelector("#prop-stroke-width") as HTMLInputElement | null;
+    const strokeLabel = this.element.querySelector<HTMLElement>("#prop-stroke-val");
     strokeSlider?.addEventListener("input", () => {
       const val = parseInt(strokeSlider.value, 10);
       editorState.updateToolSettings({ strokeWidth: val }, false);
-      const label = this.element.querySelector("#prop-stroke-val");
-      if (label) label.textContent = `${val}px`;
+      if (strokeLabel) strokeLabel.textContent = `${val}px`;
+    });
+    bindEditableSliderValue(strokeLabel, strokeSlider, {
+      unit: "px",
+      onCommit: (val) => editorState.updateToolSettings({ strokeWidth: Math.round(val) }),
     });
 
     // Opacity slider
     const opacitySlider = this.element.querySelector("#prop-opacity") as HTMLInputElement | null;
+    const opacityLabel = this.element.querySelector<HTMLElement>("#prop-opacity-val");
     opacitySlider?.addEventListener("input", () => {
       const val = parseFloat(opacitySlider.value);
       editorState.updateToolSettings({ opacity: val }, false);
-      const label = this.element.querySelector("#prop-opacity-val");
-      if (label) label.textContent = `${Math.round(val * 100)}%`;
+      if (opacityLabel) opacityLabel.textContent = `${Math.round(val * 100)}%`;
+    });
+    bindEditableSliderValue(opacityLabel, opacitySlider, {
+      scale: 100,
+      unit: "%",
+      onCommit: (val) => editorState.updateToolSettings({ opacity: val }),
     });
 
     // Fill color transparent switch
@@ -696,10 +754,14 @@ export class PropertiesPanelView {
     });
 
     const textSize = this.element.querySelector<HTMLInputElement>("#prop-font-size");
+    const textSizeLabel = this.element.querySelector<HTMLElement>("#prop-font-size-val");
     textSize?.addEventListener("input", () => {
       editorState.updateToolSettings({ fontSize: textSize.valueAsNumber }, false);
-      const label = this.element.querySelector("#prop-font-size-val");
-      if (label) label.textContent = `${textSize.value}pt`;
+      if (textSizeLabel) textSizeLabel.textContent = `${textSize.value}pt`;
+    });
+    bindEditableSliderValue(textSizeLabel, textSize, {
+      unit: "pt",
+      onCommit: (val) => editorState.updateToolSettings({ fontSize: Math.round(val) }),
     });
     const font = this.element.querySelector<HTMLSelectElement>("#prop-font-family");
     if (font) {
@@ -777,6 +839,26 @@ export class PropertiesPanelView {
         toast.show({ message: String(error), type: "error" });
       }
     });
+
+    const flattenFormsBtn = this.element.querySelector<HTMLButtonElement>("#btn-flatten-forms");
+    if (flattenFormsBtn) {
+      flattenFormsBtn.onclick = async () => {
+        const docVer = editorState.documentVersion;
+        flattenFormsBtn.disabled = true;
+        try {
+          const updated = await Backend.flattenFormFields();
+          if (editorState.documentVersion === docVer) {
+            this.formFieldCount = 0;
+            editorState.updateDocument(updated);
+          }
+          toast.show({ message: "Flattened interactive form fields into page content.", type: "success" });
+        } catch (err) {
+          toast.show({ message: `Could not flatten forms: ${String(err)}`, type: "error" });
+        } finally {
+          flattenFormsBtn.disabled = false;
+        }
+      };
+    }
 
     // Crop Panel Handlers
     const ratioSelect = this.element.querySelector("#prop-crop-ratio") as HTMLSelectElement | null;
@@ -1039,21 +1121,30 @@ export class PropertiesPanelView {
     });
 
     const strokeSlider = this.element.querySelector<HTMLInputElement>("#annot-prop-stroke-width");
+    const annotStrokeLabel = this.element.querySelector<HTMLElement>("#annot-prop-stroke-val");
     strokeSlider?.addEventListener("input", () => {
-      const label = this.element.querySelector("#annot-prop-stroke-val");
-      if (label) label.textContent = `${strokeSlider.value}px`;
+      if (annotStrokeLabel) annotStrokeLabel.textContent = `${strokeSlider.value}px`;
     });
     strokeSlider?.addEventListener("change", () => {
       void this.commitAnnotationPatch(annot, { stroke_width: strokeSlider.valueAsNumber });
     });
+    bindEditableSliderValue(annotStrokeLabel, strokeSlider, {
+      unit: "px",
+      onCommit: (val) => void this.commitAnnotationPatch(annot, { stroke_width: Math.round(val) }),
+    });
 
     const opacitySlider = this.element.querySelector<HTMLInputElement>("#annot-prop-opacity");
+    const annotOpacityLabel = this.element.querySelector<HTMLElement>("#annot-prop-opacity-val");
     opacitySlider?.addEventListener("input", () => {
-      const label = this.element.querySelector("#annot-prop-opacity-val");
-      if (label) label.textContent = `${Math.round(opacitySlider.valueAsNumber * 100)}%`;
+      if (annotOpacityLabel) annotOpacityLabel.textContent = `${Math.round(opacitySlider.valueAsNumber * 100)}%`;
     });
     opacitySlider?.addEventListener("change", () => {
       void this.commitAnnotationPatch(annot, { opacity: opacitySlider.valueAsNumber });
+    });
+    bindEditableSliderValue(annotOpacityLabel, opacitySlider, {
+      scale: 100,
+      unit: "%",
+      onCommit: (val) => void this.commitAnnotationPatch(annot, { opacity: val }),
     });
 
     const textInput = this.element.querySelector<HTMLTextAreaElement>("#annot-prop-text");
@@ -1062,12 +1153,16 @@ export class PropertiesPanelView {
     });
 
     const fontSizeSlider = this.element.querySelector<HTMLInputElement>("#annot-prop-font-size");
+    const annotFontLabel = this.element.querySelector<HTMLElement>("#annot-prop-font-size-val");
     fontSizeSlider?.addEventListener("input", () => {
-      const label = this.element.querySelector("#annot-prop-font-size-val");
-      if (label) label.textContent = `${fontSizeSlider.value}pt`;
+      if (annotFontLabel) annotFontLabel.textContent = `${fontSizeSlider.value}pt`;
     });
     fontSizeSlider?.addEventListener("change", () => {
       void this.commitAnnotationPatch(annot, { font_size: fontSizeSlider.valueAsNumber });
+    });
+    bindEditableSliderValue(annotFontLabel, fontSizeSlider, {
+      unit: "pt",
+      onCommit: (val) => void this.commitAnnotationPatch(annot, { font_size: Math.round(val) }),
     });
 
     const fontFamilySelect = this.element.querySelector<HTMLSelectElement>("#annot-prop-font-family");

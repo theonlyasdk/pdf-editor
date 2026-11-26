@@ -214,3 +214,100 @@ fn collect_name_tree(
         }
     }
 }
+
+/// Encodes a Rust string as a PDF string object (ASCII literal or UTF-16BE with BOM).
+pub fn encode_pdf_string(s: &str) -> Object {
+    if s.is_ascii() {
+        Object::string_literal(s)
+    } else {
+        let mut bytes = Vec::with_capacity(2 + s.len() * 2);
+        bytes.push(0xFE);
+        bytes.push(0xFF);
+        for unit in s.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        Object::String(bytes, lopdf::StringFormat::Literal)
+    }
+}
+
+/// Writes a complete bookmark/outline hierarchy into the PDF catalog.
+pub fn write_outline(doc_state: &mut DocumentState, items: &[OutlineItem]) -> Result<(), CoreError> {
+    let page_ids: Vec<ObjectId> = (0..doc_state.page_count())
+        .map(|i| doc_state.get_page_id(i))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let root_id = doc_state
+        .doc
+        .trailer
+        .get(b"Root")
+        .and_then(|o| o.as_reference())
+        .map_err(|_| CoreError::InvalidOperation("Missing PDF Catalog Root".to_string()))?;
+
+    if items.is_empty() {
+        if let Ok(catalog) = doc_state.doc.get_dictionary_mut(root_id) {
+            catalog.remove(b"Outlines");
+        }
+        doc_state.doc.prune_objects();
+        return Ok(());
+    }
+
+    let outlines_id = doc_state.doc.new_object_id();
+    let (first_id, last_id, total_count) =
+        write_outline_siblings(&mut doc_state.doc, outlines_id, items, &page_ids)?;
+
+    let mut outlines_dict = Dictionary::new();
+    outlines_dict.set("Type", "Outlines");
+    outlines_dict.set("First", first_id);
+    outlines_dict.set("Last", last_id);
+    outlines_dict.set("Count", total_count as i64);
+    doc_state
+        .doc
+        .objects
+        .insert(outlines_id, Object::Dictionary(outlines_dict));
+
+    let catalog = doc_state.doc.get_dictionary_mut(root_id)?;
+    catalog.set("Outlines", outlines_id);
+    doc_state.doc.prune_objects();
+    Ok(())
+}
+
+fn write_outline_siblings(
+    doc: &mut Document,
+    parent_id: ObjectId,
+    items: &[OutlineItem],
+    page_ids: &[ObjectId],
+) -> Result<(ObjectId, ObjectId, usize), CoreError> {
+    let ids: Vec<ObjectId> = (0..items.len()).map(|_| doc.new_object_id()).collect();
+    let mut total_visible = items.len();
+
+    for (idx, item) in items.iter().enumerate() {
+        let mut dict = Dictionary::new();
+        dict.set("Title", encode_pdf_string(&item.title));
+        dict.set("Parent", parent_id);
+        if idx > 0 {
+            dict.set("Prev", ids[idx - 1]);
+        }
+        if idx + 1 < items.len() {
+            dict.set("Next", ids[idx + 1]);
+        }
+        if let Some(page_idx) = item.page_index {
+            if let Some(&page_id) = page_ids.get(page_idx) {
+                dict.set(
+                    "Dest",
+                    vec![Object::Reference(page_id), Object::Name(b"Fit".to_vec())],
+                );
+            }
+        }
+        if !item.children.is_empty() {
+            let (child_first, child_last, child_count) =
+                write_outline_siblings(doc, ids[idx], &item.children, page_ids)?;
+            dict.set("First", child_first);
+            dict.set("Last", child_last);
+            dict.set("Count", child_count as i64);
+            total_visible += child_count;
+        }
+        doc.objects.insert(ids[idx], Object::Dictionary(dict));
+    }
+
+    Ok((ids[0], ids[ids.len() - 1], total_visible))
+}

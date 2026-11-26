@@ -18,6 +18,7 @@ import {
   Maximize2,
   MessageSquare,
   Moon,
+  MoreHorizontal,
   MousePointer2,
   MoveHorizontal,
   PanelRightClose,
@@ -63,6 +64,8 @@ export class ToolbarView {
   private lastActionKey = "";
   private isRenamingDoc = false;
   private headerResizeObserver: ResizeObserver | null = null;
+  private actionResizeObserver: ResizeObserver | null = null;
+  private overflowedActionButtons: HTMLButtonElement[] = [];
 
   constructor(header: HTMLElement, actionToolbar: HTMLElement) {
     this.headerElement = header;
@@ -70,6 +73,8 @@ export class ToolbarView {
     if (typeof ResizeObserver !== "undefined") {
       this.headerResizeObserver = new ResizeObserver(() => this.syncHeaderCompactMode());
       this.headerResizeObserver.observe(this.headerElement);
+      this.actionResizeObserver = new ResizeObserver(() => this.syncActionToolbarOverflow());
+      this.actionResizeObserver.observe(this.actionToolbarElement);
     }
     this.actionToolbarElement.addEventListener("contextmenu", (event) => {
       const tool = (event.target as Element).closest<HTMLButtonElement>("[data-tool]")?.dataset.tool;
@@ -154,7 +159,7 @@ export class ToolbarView {
       <div class="header-right">
         <div class="document-controls">
           <!-- View mode buttons -->
-          <div class="ui-button-group mr-1" role="group">
+          <div class="ui-button-group mr-1 header-right-expanded" role="group">
             <button class="ui-button ui-button--tool ${editorState.viewMode === "continuous" ? "active" : ""}" id="view-mode-continuous" title="${STRINGS.viewModes.continuous}">
               ${icon(PanelsTopLeft)}
             </button>
@@ -169,23 +174,23 @@ export class ToolbarView {
             </button>
           </div>
 
-          <div class="tool-separator"></div>
+          <div class="tool-separator header-right-expanded"></div>
 
           <!-- Fit & Find controls -->
-          <button class="ui-button ui-button--tool ${fitMode === "fit-width" ? "active" : ""}" id="btn-fit-width" title="${STRINGS.viewModes.fitWidth}">
+          <button class="ui-button ui-button--tool header-right-expanded ${fitMode === "fit-width" ? "active" : ""}" id="btn-fit-width" title="${STRINGS.viewModes.fitWidth}">
             ${icon(MoveHorizontal)}
           </button>
-          <button class="ui-button ui-button--tool ${fitMode === "fit-page" ? "active" : ""}" id="btn-fit-page" title="${STRINGS.viewModes.fitPage}">
+          <button class="ui-button ui-button--tool header-right-expanded ${fitMode === "fit-page" ? "active" : ""}" id="btn-fit-page" title="${STRINGS.viewModes.fitPage}">
             ${icon(Maximize2)}
           </button>
 
           <button class="ui-button ui-button--tool" id="btn-find-text" title="Find in document (Ctrl+F)">
             ${icon(Search)}
           </button>
-          <button class="ui-button ui-button--tool ${!propsCollapsed ? "active" : ""}" id="btn-toggle-properties" title="${propsCollapsed ? "Show Properties panel" : "Hide Properties panel"}">
+          <button class="ui-button ui-button--tool header-right-expanded ${!propsCollapsed ? "active" : ""}" id="btn-toggle-properties" title="${propsCollapsed ? "Show Properties panel" : "Hide Properties panel"}">
             ${propsCollapsed ? icon(PanelRightOpen) : icon(PanelRightClose)}
           </button>
-          <div class="tool-separator"></div>
+          <div class="tool-separator header-right-expanded"></div>
         </div>
 
         <!-- Command Palette Trigger -->
@@ -194,7 +199,7 @@ export class ToolbarView {
         </button>
 
         <!-- Keyboard Shortcuts -->
-        <button class="ui-button ui-button--tool" id="btn-shortcuts" title="${STRINGS.menu.shortcuts} (?)">
+        <button class="ui-button ui-button--tool header-right-expanded" id="btn-shortcuts" title="${STRINGS.menu.shortcuts} (?)">
           ${icon(Keyboard)}
         </button>
 
@@ -204,8 +209,13 @@ export class ToolbarView {
         </button>
 
         <!-- Theme Toggle -->
-        <button class="ui-button ui-button--tool" id="btn-theme-toggle" title="Toggle Light / Dark theme">
+        <button class="ui-button ui-button--tool header-right-expanded" id="btn-theme-toggle" title="Toggle Light / Dark theme">
           ${editorState.theme === "dark" ? icon(Sun) : icon(Moon)}
+        </button>
+
+        <!-- Compact Right Overflow Menu -->
+        <button class="ui-button ui-button--tool" id="btn-header-right-menu" type="button" title="More view &amp; app options" aria-label="More view and app options" aria-haspopup="menu">
+          ${icon(MoreHorizontal)}
         </button>
       </div>
     `;
@@ -376,10 +386,69 @@ export class ToolbarView {
           ${icon(Trash2)}
         </button>
       </div>
+      <button class="ui-button ui-button--tool action-overflow-btn" id="btn-action-overflow" type="button" title="More tools" aria-label="More tools" aria-haspopup="menu" hidden>
+        ${icon(MoreHorizontal)}
+      </button>
     `;
 
     this.labelButtons(this.actionToolbarElement);
     this.bindActionToolbarEvents();
+    this.syncActionToolbarOverflow();
+  }
+
+  private syncActionToolbarOverflow() {
+    const bar = this.actionToolbarElement;
+    const overflowBtn = bar.querySelector<HTMLButtonElement>("#btn-action-overflow");
+    if (!overflowBtn || !editorState.doc) return;
+
+    const groups = Array.from(bar.querySelectorAll<HTMLElement>(".tool-group"));
+    const allButtons = groups.flatMap((g) => Array.from(g.querySelectorAll<HTMLButtonElement>("button.ui-button--tool")));
+    const allSeps = groups.flatMap((g) => Array.from(g.querySelectorAll<HTMLElement>(".tool-separator")));
+
+    for (const btn of allButtons) btn.classList.remove("action-overflow-hidden");
+    for (const sep of allSeps) sep.classList.remove("action-overflow-hidden");
+    overflowBtn.hidden = true;
+    this.overflowedActionButtons = [];
+
+    const available = bar.clientWidth;
+    if (available <= 0 || bar.scrollWidth <= available + 1) return;
+
+    overflowBtn.hidden = false;
+    const barRect = bar.getBoundingClientRect();
+    const overflowWidth = overflowBtn.offsetWidth || 30;
+    const limit = barRect.right - overflowWidth - 16;
+
+    for (const btn of allButtons) {
+      const rect = btn.getBoundingClientRect();
+      if (rect.right > limit) {
+        btn.classList.add("action-overflow-hidden");
+        this.overflowedActionButtons.push(btn);
+      }
+    }
+
+    for (const sep of allSeps) {
+      let hasPrev = false;
+      let prev = sep.previousElementSibling;
+      while (prev) {
+        if (!prev.classList.contains("action-overflow-hidden") && !prev.classList.contains("tool-separator")) {
+          hasPrev = true;
+          break;
+        }
+        prev = prev.previousElementSibling;
+      }
+      let hasNext = false;
+      let next = sep.nextElementSibling;
+      while (next) {
+        if (!next.classList.contains("action-overflow-hidden") && !next.classList.contains("tool-separator")) {
+          hasNext = true;
+          break;
+        }
+        next = next.nextElementSibling;
+      }
+      if (!hasPrev || !hasNext) {
+        sep.classList.add("action-overflow-hidden");
+      }
+    }
   }
 
   private bindHeaderEvents() {
@@ -484,6 +553,30 @@ export class ToolbarView {
 
     this.headerElement.querySelector("#btn-preferences")?.addEventListener("click", () => {
       window.dispatchEvent(new CustomEvent("open-preferences"));
+    });
+
+    const rightOverflowBtn = this.headerElement.querySelector<HTMLButtonElement>("#btn-header-right-menu");
+    const openRightOverflowMenu = (event: MouseEvent) => {
+      const propsCollapsed = editorState.propertiesCollapsed;
+      showContextMenu(event, "View & Tools", [
+        { label: `${STRINGS.viewModes.continuous}${editorState.viewMode === "continuous" ? " ✓" : ""}`, icon: PanelsTopLeft, run: () => editorState.setViewMode("continuous") },
+        { label: `${STRINGS.viewModes.single}${editorState.viewMode === "single" ? " ✓" : ""}`, icon: RectangleVertical, run: () => editorState.setViewMode("single") },
+        { label: `${STRINGS.viewModes.spread}${editorState.viewMode === "spread" ? " ✓" : ""}`, icon: Columns2, run: () => editorState.setViewMode("spread") },
+        { label: `${STRINGS.viewModes.grid}${editorState.viewMode === "grid" ? " ✓" : ""}`, icon: Grid2X2, run: () => editorState.setViewMode("grid") },
+        { label: STRINGS.viewModes.fitWidth, icon: MoveHorizontal, run: () => editorState.requestFitWidth() },
+        { label: STRINGS.viewModes.fitPage, icon: Maximize2, run: () => editorState.requestFitPage() },
+        { label: propsCollapsed ? "Show Properties panel" : "Hide Properties panel", icon: propsCollapsed ? PanelRightOpen : PanelRightClose, run: () => editorState.togglePropertiesCollapsed() },
+        { label: `${STRINGS.menu.shortcuts} (?)`, icon: Keyboard, run: () => { window.dispatchEvent(new CustomEvent("open-shortcuts")); } },
+        { label: editorState.theme === "dark" ? "Switch to Light theme" : "Switch to Dark theme", icon: editorState.theme === "dark" ? Sun : Moon, run: () => editorState.toggleTheme() },
+      ]);
+    };
+    rightOverflowBtn?.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      openRightOverflowMenu(event);
+    });
+    rightOverflowBtn?.addEventListener("click", (event) => {
+      if (event.detail === 0) openRightOverflowMenu(event);
     });
 
     // View modes
@@ -650,6 +743,30 @@ export class ToolbarView {
       } catch (err: any) {
         toast.show({ message: err.toString(), type: "error" });
       }
+    });
+
+    const overflowBtn = this.actionToolbarElement.querySelector<HTMLButtonElement>("#btn-action-overflow");
+    const openActionOverflow = (event: MouseEvent) => {
+      if (this.overflowedActionButtons.length === 0) return;
+      showContextMenu(
+        event,
+        "More Tools",
+        this.overflowedActionButtons.map((btn) => ({
+          label: `${btn.getAttribute("aria-label") || btn.title || "Tool"}${btn.classList.contains("active") ? " ✓" : ""}`,
+          destructive: btn.classList.contains("text-destructive"),
+          run: () => {
+            btn.click();
+          },
+        }))
+      );
+    };
+    overflowBtn?.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      openActionOverflow(event);
+    });
+    overflowBtn?.addEventListener("click", (event) => {
+      if (event.detail === 0) openActionOverflow(event);
     });
   }
 }

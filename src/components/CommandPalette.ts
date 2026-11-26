@@ -95,6 +95,28 @@ export class CommandPaletteView {
           if (isDoc) window.dispatchEvent(new CustomEvent("open-export-print"));
         },
       },
+      {
+        id: "add-bookmark",
+        category: "Navigation",
+        label: "Add Bookmark at Current Page",
+        shortcut: "Ctrl+Shift+B",
+        action: () => {
+          if (isDoc) {
+            editorState.setSidebarTab("outline");
+            window.dispatchEvent(new CustomEvent("add-bookmark-current-page"));
+          }
+        },
+      },
+      {
+        id: "flatten-forms",
+        category: "Forms",
+        label: "Flatten Interactive Form Fields",
+        action: async () => {
+          if (!isDoc) return;
+          const updated = await Backend.flattenFormFields();
+          editorState.updateDocument(updated);
+        },
+      },
 
       // Tools
       {

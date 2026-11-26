@@ -1,13 +1,15 @@
-import { AlertTriangle, RotateCcw, Settings, Trash2, X } from "lucide";
+import { AlertTriangle, BookOpen, Grid2X2, Palette, RotateCcw, Save, Settings, Trash2, X } from "lucide";
 import { STRINGS } from "../i18n/strings";
 import { editorState } from "../state/editorState";
 import { DefaultZoomMode, MeasurementUnit, ThemeMode, ViewMode } from "../types/editor";
 import { toast } from "./Toast";
 import { icon } from "./ui/icon";
+import { animateDialogSize, initSlidingTabs } from "./ui/modalMotion";
 
 export class PreferencesModalView {
   private dialog: HTMLDialogElement;
   private focusReturn: HTMLElement | null = null;
+  private activeTab: "appearance" | "editing" | "grid" | "saving" = "appearance";
 
   constructor() {
     this.dialog = document.createElement("dialog");
@@ -57,8 +59,28 @@ export class PreferencesModalView {
           </button>
         </header>
 
-        <div class="editor-modal-body">
-          <section class="prefs-section">
+        <div class="editor-modal-body prefs-layout">
+          <nav class="prefs-sidebar" role="tablist" aria-label="Preference categories" aria-orientation="vertical">
+            <button type="button" class="prefs-tab-btn ${this.activeTab === "appearance" ? "active" : ""}" role="tab" aria-selected="${this.activeTab === "appearance"}" data-prefs-tab-btn="appearance">
+              ${icon(Palette, 15)}
+              <span>Appearance</span>
+            </button>
+            <button type="button" class="prefs-tab-btn ${this.activeTab === "editing" ? "active" : ""}" role="tab" aria-selected="${this.activeTab === "editing"}" data-prefs-tab-btn="editing">
+              ${icon(BookOpen, 15)}
+              <span>Reading &amp; Editing</span>
+            </button>
+            <button type="button" class="prefs-tab-btn ${this.activeTab === "grid" ? "active" : ""}" role="tab" aria-selected="${this.activeTab === "grid"}" data-prefs-tab-btn="grid">
+              ${icon(Grid2X2, 15)}
+              <span>Grid &amp; Memory</span>
+            </button>
+            <button type="button" class="prefs-tab-btn ${this.activeTab === "saving" ? "active" : ""}" role="tab" aria-selected="${this.activeTab === "saving"}" data-prefs-tab-btn="saving">
+              ${icon(Save, 15)}
+              <span>Saving &amp; Data</span>
+            </button>
+          </nav>
+
+          <div class="prefs-content">
+          <section class="prefs-section" data-prefs-panel="appearance" ${this.activeTab === "appearance" ? "" : "hidden"}>
             <h3 class="prefs-section-title">${STRINGS.preferences.appearance}</h3>
 
             <div class="prefs-row">
@@ -108,6 +130,18 @@ export class PreferencesModalView {
               <input type="checkbox" id="prefs-reopen-last-pdf" ${prefs.reopenLastPdf ? "checked" : ""} />
               <span>${STRINGS.preferences.reopenLastPdf}</span>
             </label>
+          </section>
+
+          <section class="prefs-section" data-prefs-panel="editing" ${this.activeTab === "editing" ? "" : "hidden"}>
+            <h3 class="prefs-section-title">Reading &amp; Editing</h3>
+
+            <div class="prefs-row">
+              <label class="prefs-label" for="prefs-default-tool">Default tool on open</label>
+              <select class="ui-input" id="prefs-default-tool">
+                <option value="select" ${(prefs.defaultTool ?? "select") === "select" ? "selected" : ""}>Select &amp; Text</option>
+                <option value="hand" ${prefs.defaultTool === "hand" ? "selected" : ""}>Hand / Pan</option>
+              </select>
+            </div>
 
             <div class="prefs-row">
               <label class="prefs-label" for="prefs-units">${STRINGS.preferences.units}</label>
@@ -122,9 +156,19 @@ export class PreferencesModalView {
               <label class="prefs-label" for="prefs-author">${STRINGS.preferences.author}</label>
               <input type="text" class="ui-input" id="prefs-author" placeholder="User" />
             </div>
+
+            <label class="ui-check prefs-check">
+              <input type="checkbox" id="prefs-show-links" ${prefs.showLinks !== false ? "checked" : ""} />
+              <span>Enable clickable PDF links</span>
+            </label>
+
+            <label class="ui-check prefs-check">
+              <input type="checkbox" id="prefs-show-forms" ${prefs.showForms !== false ? "checked" : ""} />
+              <span>Enable interactive form fields (AcroForms)</span>
+            </label>
           </section>
 
-          <section class="prefs-section">
+          <section class="prefs-section" data-prefs-panel="grid" ${this.activeTab === "grid" ? "" : "hidden"}>
             <h3 class="prefs-section-title">${STRINGS.preferences.gridAndMemory}</h3>
 
             <div class="prefs-row">
@@ -139,6 +183,15 @@ export class PreferencesModalView {
               </select>
             </div>
 
+            <div class="prefs-row">
+              <label class="prefs-label" for="prefs-zoom-sensitivity">Wheel zoom speed</label>
+              <select class="ui-input" id="prefs-zoom-sensitivity">
+                <option value="0.6" ${(prefs.zoomSensitivity ?? 1) === 0.6 ? "selected" : ""}>Slow (0.6×)</option>
+                <option value="1" ${(prefs.zoomSensitivity ?? 1) === 1 ? "selected" : ""}>Normal (1×)</option>
+                <option value="1.5" ${(prefs.zoomSensitivity ?? 1) === 1.5 ? "selected" : ""}>Fast (1.5×)</option>
+              </select>
+            </div>
+
             <label class="ui-check prefs-check">
               <input type="checkbox" id="prefs-cache-all-pages" ${prefs.cacheAllPages ? "checked" : ""} />
               <span>${STRINGS.preferences.cacheAllPages}</span>
@@ -150,7 +203,7 @@ export class PreferencesModalView {
             </div>
           </section>
 
-          <section class="prefs-section">
+          <section class="prefs-section" data-prefs-panel="saving" ${this.activeTab === "saving" ? "" : "hidden"}>
             <h3 class="prefs-section-title">${STRINGS.preferences.saving}</h3>
 
             <label class="ui-check prefs-check">
@@ -177,6 +230,7 @@ export class PreferencesModalView {
               </button>
             </div>
           </section>
+          </div>
         </div>
 
         <footer class="editor-modal-footer">
@@ -195,6 +249,29 @@ export class PreferencesModalView {
     authorInput.value = prefs.author;
 
     this.dialog.querySelector("#prefs-close-btn")?.addEventListener("click", () => this.close());
+    const sidebar = this.dialog.querySelector<HTMLElement>(".prefs-sidebar");
+    const sliding = sidebar ? initSlidingTabs(sidebar, "[data-prefs-tab-btn]") : null;
+    this.dialog.querySelectorAll<HTMLButtonElement>("[data-prefs-tab-btn]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const tab = btn.dataset.prefsTabBtn as "appearance" | "editing" | "grid" | "saving" | undefined;
+        if (!tab || tab === this.activeTab) return;
+        this.activeTab = tab;
+        const card = this.dialog.querySelector<HTMLElement>(".editor-modal-card");
+        const apply = () => {
+          this.dialog.querySelectorAll<HTMLButtonElement>("[data-prefs-tab-btn]").forEach((b) => {
+            const active = b.dataset.prefsTabBtn === tab;
+            b.classList.toggle("active", active);
+            b.setAttribute("aria-selected", String(active));
+          });
+          this.dialog.querySelectorAll<HTMLElement>("[data-prefs-panel]").forEach((panel) => {
+            panel.hidden = panel.dataset.prefsPanel !== tab;
+          });
+        };
+        if (card) animateDialogSize(card, apply);
+        else apply();
+        sliding?.update();
+      });
+    });
     this.dialog.querySelector("#prefs-done-btn")?.addEventListener("click", () => this.close());
 
     this.dialog.querySelector<HTMLSelectElement>("#prefs-theme-mode")?.addEventListener("change", (e) => {
@@ -229,6 +306,22 @@ export class PreferencesModalView {
 
     this.dialog.querySelector<HTMLInputElement>("#prefs-reopen-last-pdf")?.addEventListener("change", (e) => {
       editorState.updatePreferences({ reopenLastPdf: (e.target as HTMLInputElement).checked });
+    });
+
+    this.dialog.querySelector<HTMLSelectElement>("#prefs-default-tool")?.addEventListener("change", (e) => {
+      editorState.updatePreferences({ defaultTool: (e.target as HTMLSelectElement).value as "select" | "hand" });
+    });
+
+    this.dialog.querySelector<HTMLInputElement>("#prefs-show-links")?.addEventListener("change", (e) => {
+      editorState.updatePreferences({ showLinks: (e.target as HTMLInputElement).checked });
+    });
+
+    this.dialog.querySelector<HTMLInputElement>("#prefs-show-forms")?.addEventListener("change", (e) => {
+      editorState.updatePreferences({ showForms: (e.target as HTMLInputElement).checked });
+    });
+
+    this.dialog.querySelector<HTMLSelectElement>("#prefs-zoom-sensitivity")?.addEventListener("change", (e) => {
+      editorState.updatePreferences({ zoomSensitivity: Number((e.target as HTMLSelectElement).value) || 1 });
     });
 
     this.dialog.querySelector<HTMLSelectElement>("#prefs-units")?.addEventListener("change", (e) => {

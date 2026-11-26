@@ -1,7 +1,7 @@
 pub mod commands;
 pub mod worker_pool;
 
-use commands::{AppState, SharedState};
+use commands::{extract_launch_file_from_args, AppState, LaunchFileState, SharedState};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -14,15 +14,20 @@ fn cleanup_app_state(app_handle: &tauri::AppHandle) {
     if let Some(state) = app_handle.try_state::<SharedState>() {
         state.lock().clear_for_exit();
     }
+    commands::clear_recovery_files(app_handle);
 }
 
 pub fn run() {
     let initial_state = Arc::new(Mutex::new(AppState::new()));
+    let launch_file = LaunchFileState(Mutex::new(extract_launch_file_from_args(
+        std::env::args_os(),
+    )));
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(initial_state)
+        .manage(launch_file)
         .invoke_handler(tauri::generate_handler![
             commands::open_document,
             commands::new_document,
@@ -54,10 +59,22 @@ pub fn run() {
             commands::add_image_annotation,
             commands::apply_watermark_or_page_numbers,
             commands::get_document_outline,
+            commands::update_document_outline,
+            commands::get_page_text_spans,
+            commands::get_page_links,
+            commands::get_form_fields,
+            commands::set_form_field_value,
+            commands::flatten_form_fields,
             commands::detect_crop_margins,
             commands::reveal_in_folder,
             commands::rename_document,
             commands::open_external_url,
+            commands::consume_launch_file,
+            commands::read_image_data_url,
+            commands::snapshot_recovery_state,
+            commands::check_recovery_state,
+            commands::restore_recovery_state,
+            commands::discard_recovery_state,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -1,5 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { AnnotationDto, DocumentDto, PageBox, SearchResult } from "../types/editor";
+import { AnnotationDto, DocumentDto, FormFieldDto, LinkDto, PageBox, SearchResult, TextSpanDto } from "../types/editor";
 
 export interface DocumentMetadataUpdate {
   title?: string | null;
@@ -60,6 +60,16 @@ async function callIpc<T>(cmd: string, args: Record<string, unknown> = {}): Prom
   throw new Error(`Tauri IPC not available for '${cmd}' outside desktop app`);
 }
 
+export interface RenderPageOptions {
+  generation?: number;
+  queueId?: number;
+}
+
+export function isRenderCancelledError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg === "cancelled" || msg.includes("cancelled");
+}
+
 export const Backend = {
   async openDocument(path: string, password?: string): Promise<DocumentDto> {
     return callIpc<DocumentDto>("open_document", { path, password });
@@ -74,8 +84,18 @@ export const Backend = {
     return URL.createObjectURL(new Blob([buf], { type: "image/png" }));
   },
 
-  async renderPageRaw(pageIndex: number, targetWidth: number): Promise<ArrayBuffer> {
-    return callIpc<ArrayBuffer>("render_page", { pageIndex, targetWidth, format: "rgba" });
+  async renderPageRaw(
+    pageIndex: number,
+    targetWidth: number,
+    options?: RenderPageOptions
+  ): Promise<ArrayBuffer> {
+    return callIpc<ArrayBuffer>("render_page", {
+      pageIndex,
+      targetWidth,
+      format: "rgba",
+      generation: options?.generation ?? null,
+      queueId: options?.queueId ?? null,
+    });
   },
 
   async renderPagePng(pageIndex: number, targetWidth: number): Promise<ArrayBuffer> {
@@ -182,6 +202,30 @@ export const Backend = {
     return callIpc<OutlineItem[]>("get_document_outline");
   },
 
+  async updateDocumentOutline(items: OutlineItem[]): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("update_document_outline", { items });
+  },
+
+  async getPageTextSpans(pageIndex: number): Promise<TextSpanDto[]> {
+    return callIpc<TextSpanDto[]>("get_page_text_spans", { pageIndex });
+  },
+
+  async getPageLinks(pageIndex: number): Promise<LinkDto[]> {
+    return callIpc<LinkDto[]>("get_page_links", { pageIndex });
+  },
+
+  async getFormFields(): Promise<FormFieldDto[]> {
+    return callIpc<FormFieldDto[]>("get_form_fields");
+  },
+
+  async setFormFieldValue(fieldId: string, value: string): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("set_form_field_value", { fieldId, value });
+  },
+
+  async flattenFormFields(): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("flatten_form_fields");
+  },
+
   async detectCropMargins(pageIndex: number): Promise<PageBox> {
     return callIpc<PageBox>("detect_crop_margins", { pageIndex });
   },
@@ -206,8 +250,8 @@ export const Backend = {
     return callIpc<number[]>("evaluate_range", { expression, totalPages });
   },
 
-  async searchDocument(query: string, caseSensitive: boolean): Promise<SearchResult[]> {
-    return callIpc<SearchResult[]>("search_document", { query, caseSensitive });
+  async searchDocument(query: string, caseSensitive: boolean, isRegex = false): Promise<SearchResult[]> {
+    return callIpc<SearchResult[]>("search_document", { query, caseSensitive, isRegex });
   },
 
   async getDocumentState(): Promise<DocumentDto> {
@@ -227,5 +271,33 @@ export const Backend = {
       return callIpc<void>("open_external_url", { url });
     }
     window.open(url, "_blank", "noopener,noreferrer");
+  },
+
+  async consumeLaunchFile(): Promise<string | null> {
+    if (!isTauri()) return null;
+    return callIpc<string | null>("consume_launch_file");
+  },
+
+  async readImageDataUrl(path: string): Promise<string> {
+    return callIpc<string>("read_image_data_url", { path });
+  },
+
+  async snapshotRecoveryState(): Promise<boolean> {
+    if (!isTauri()) return false;
+    return callIpc<boolean>("snapshot_recovery_state");
+  },
+
+  async checkRecoveryState(): Promise<{ original_path?: string | null; file_name: string; saved_at_ms: number } | null> {
+    if (!isTauri()) return null;
+    return callIpc<{ original_path?: string | null; file_name: string; saved_at_ms: number } | null>("check_recovery_state");
+  },
+
+  async restoreRecoveryState(): Promise<DocumentDto> {
+    return callIpc<DocumentDto>("restore_recovery_state");
+  },
+
+  async discardRecoveryState(): Promise<void> {
+    if (!isTauri()) return;
+    return callIpc<void>("discard_recovery_state");
   },
 };

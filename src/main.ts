@@ -18,6 +18,14 @@ import { guardedOpenPdf, initWindowCloseGuard } from "./components/UnsavedGuard"
 import { openPdf } from "./components/OpenPdf";
 import { initCustomSelects } from "./components/ui/Select";
 import { icon } from "./components/ui/icon";
+import {
+  handleDroppedImagePath,
+  initImagePasteHandler,
+  isSupportedImageFile,
+  isSupportedImagePath,
+  placeImageOnPageAtClientPoint,
+} from "./components/imageDropPaste";
+import { rasterizeImageBlob } from "./components/SignatureModal";
 import { STRINGS } from "./i18n/strings";
 import { Backend } from "./ipc/backend";
 import { editorState } from "./state/editorState";
@@ -62,7 +70,11 @@ async function setupWindowDragDrop() {
         document.body.classList.remove("window-drag-over");
         const paths = payload.paths;
         if (paths && paths.length > 0) {
-          await guardedOpenPdf(paths[0]);
+          if (editorState.doc && isSupportedImagePath(paths[0])) {
+            await handleDroppedImagePath(paths[0], payload.position?.x, payload.position?.y);
+          } else {
+            await guardedOpenPdf(paths[0]);
+          }
         }
       }
     });
@@ -72,8 +84,17 @@ async function setupWindowDragDrop() {
     window.addEventListener("drop", async (e: any) => {
       e.preventDefault();
       if (e.dataTransfer?.files?.length) {
-        const file = e.dataTransfer.files[0];
-        await guardedOpenPdf(file.path || file.name);
+        const file: File = e.dataTransfer.files[0];
+        if (editorState.doc && isSupportedImageFile(file)) {
+          try {
+            const { dataUrl, width, height } = await rasterizeImageBlob(file, 1200);
+            await placeImageOnPageAtClientPoint(dataUrl, width, height, e.clientX, e.clientY, file.name);
+          } catch (err) {
+            toast.show({ message: `Could not add image: ${String(err)}`, type: "error" });
+          }
+          return;
+        }
+        await guardedOpenPdf((file as any).path || file.name);
       }
     });
   }
@@ -89,6 +110,7 @@ function openStatusPageJump() {
   isEditingPageJump = true;
   const cur = editorState.currentPage + 1;
   const total = doc.page_count;
+  const curLabel = doc.pages[editorState.currentPage]?.label || String(cur);
 
   const form = document.createElement("form");
   form.className = "status-page-jump-form";
@@ -97,12 +119,10 @@ function openStatusPageJump() {
     <span>Page</span>
     <input
       id="status-page-jump-input"
-      type="number"
+      type="text"
       class="status-page-jump-input"
-      min="1"
-      max="${total}"
-      value="${cur}"
-      aria-label="Jump to page number"
+      value="${curLabel.replace(/"/g, "&quot;")}"
+      aria-label="Jump to page number or label"
     />
     <span>of ${total}</span>
   `;
@@ -118,9 +138,18 @@ function openStatusPageJump() {
     finished = true;
     isEditingPageJump = false;
     if (commit) {
-      const parsed = Math.floor(Number(input.value));
-      if (Number.isFinite(parsed) && parsed >= 1 && parsed <= total) {
-        jumpToPage(parsed - 1);
+      const raw = input.value.trim();
+      if (raw) {
+        const exactIdx = doc.pages.findIndex((p) => p.label === raw);
+        const ciIdx = exactIdx >= 0 ? exactIdx : doc.pages.findIndex((p) => p.label?.toLowerCase() === raw.toLowerCase());
+        if (ciIdx >= 0) {
+          jumpToPage(ciIdx);
+        } else {
+          const parsed = Math.floor(Number(raw));
+          if (Number.isFinite(parsed) && parsed >= 1 && parsed <= total) {
+            jumpToPage(parsed - 1);
+          }
+        }
       }
     }
     updateStatusBar();
@@ -143,14 +172,146 @@ function openStatusPageJump() {
   });
 }
 
+let activeZoomPopover: {
+  root: HTMLElement;
+  slider: HTMLInputElement;
+  valueBtn: HTMLButtonElement;
+  isEditingInput: () => boolean;
+  close: () => void;
+} | null = null;
+
+function openZoomPopover(anchor: HTMLElement) {
+  if (activeZoomPopover) {
+    activeZoomPopover.close();
+    return;
+  }
+
+  const popover = document.createElement("div");
+  popover.className = "zoom-popover";
+  popover.setAttribute("role", "dialog");
+  popover.setAttribute("aria-label", "Zoom level");
+
+  const pct = Math.round(editorState.zoom * 100);
+  popover.innerHTML = `
+    <div class="zoom-popover-row">
+      <input type="range" class="ui-slider zoom-popover-slider" min="10" max="800" step="1" value="${pct}" aria-label="Zoom percentage" />
+      <button type="button" class="zoom-popover-value" title="Click to enter custom zoom">${pct}%</button>
+    </div>
+  `;
+
+  document.body.appendChild(popover);
+
+  const slider = popover.querySelector<HTMLInputElement>(".zoom-popover-slider")!;
+  const valueBtn = popover.querySelector<HTMLButtonElement>(".zoom-popover-value")!;
+  let editing = false;
+
+  const rect = anchor.getBoundingClientRect();
+  const popW = popover.offsetWidth || 220;
+  const popH = popover.offsetHeight || 42;
+  popover.style.left = `${Math.max(8, Math.min(rect.right - popW, window.innerWidth - popW - 8))}px`;
+  popover.style.top = `${Math.max(8, rect.top - popH - 6)}px`;
+
+  const abort = new AbortController();
+  const close = () => {
+    abort.abort();
+    popover.remove();
+    activeZoomPopover = null;
+  };
+
+  activeZoomPopover = {
+    root: popover,
+    slider,
+    valueBtn,
+    isEditingInput: () => editing,
+    close,
+  };
+
+  slider.addEventListener("input", () => {
+    const val = Number(slider.value);
+    if (Number.isFinite(val)) {
+      editorState.setZoom(val / 100);
+    }
+  });
+
+  valueBtn.addEventListener("click", () => {
+    if (editing) return;
+    editing = true;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.inputMode = "numeric";
+    input.className = "zoom-popover-input";
+    input.value = String(Math.round(editorState.zoom * 100));
+    input.setAttribute("aria-label", "Custom zoom percentage");
+    valueBtn.replaceWith(input);
+    input.focus();
+    input.select();
+
+    const finish = (commit: boolean) => {
+      if (!editing) return;
+      editing = false;
+      if (commit) {
+        const raw = input.value.replace("%", "").trim();
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          const clamped = Math.min(800, Math.max(10, Math.round(parsed)));
+          editorState.setZoom(clamped / 100);
+        }
+      }
+      valueBtn.textContent = `${Math.round(editorState.zoom * 100)}%`;
+      input.replaceWith(valueBtn);
+    };
+
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        finish(true);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        finish(false);
+      }
+    });
+    input.addEventListener("blur", () => finish(true));
+  });
+
+  window.addEventListener(
+    "pointerdown",
+    (e) => {
+      const target = e.target as Node;
+      if (!popover.contains(target) && !anchor.contains(target)) {
+        close();
+      }
+    },
+    { capture: true, signal: abort.signal }
+  );
+
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key === "Escape" && !editing) {
+        e.preventDefault();
+        close();
+      }
+    },
+    { signal: abort.signal }
+  );
+}
+
 function setupStatusBarZoomControls() {
   const zoomOutBtn = document.getElementById("btn-zoom-out") as HTMLButtonElement | null;
   const zoomInBtn = document.getElementById("btn-zoom-in") as HTMLButtonElement | null;
+  const zoomInfoBtn = document.getElementById("status-zoom-info") as HTMLButtonElement | null;
   if (zoomOutBtn) {
     zoomOutBtn.innerHTML = icon(ZoomOut);
     zoomOutBtn.title = STRINGS.viewModes.zoomOut;
     zoomOutBtn.setAttribute("aria-label", STRINGS.viewModes.zoomOut);
     zoomOutBtn.addEventListener("click", () => editorState.zoomOut());
+  }
+  if (zoomInfoBtn) {
+    zoomInfoBtn.addEventListener("click", () => {
+      if (!editorState.doc) return;
+      openZoomPopover(zoomInfoBtn);
+    });
   }
   if (zoomInBtn) {
     zoomInBtn.innerHTML = icon(ZoomIn);
@@ -169,6 +330,7 @@ function updateStatusBar() {
 
   if (!editorState.doc) {
     isEditingPageJump = false;
+    activeZoomPopover?.close();
     if (pageInfoSpan) pageInfoSpan.textContent = "Ready";
     if (zoomControls) zoomControls.hidden = true;
     if (zoomInfoSpan) zoomInfoSpan.textContent = "";
@@ -176,8 +338,15 @@ function updateStatusBar() {
   }
 
   if (zoomControls) zoomControls.hidden = false;
+  const zoomPct = Math.round(editorState.zoom * 100);
   if (zoomInfoSpan) {
-    zoomInfoSpan.textContent = `${Math.round(editorState.zoom * 100)}%`;
+    zoomInfoSpan.textContent = `${zoomPct}%`;
+  }
+  if (activeZoomPopover) {
+    activeZoomPopover.slider.value = String(zoomPct);
+    if (!activeZoomPopover.isEditingInput()) {
+      activeZoomPopover.valueBtn.textContent = `${zoomPct}%`;
+    }
   }
   if (zoomOutBtn) zoomOutBtn.disabled = editorState.zoom <= 0.1001;
   if (zoomInBtn) zoomInBtn.disabled = editorState.zoom >= 7.9999;
@@ -187,13 +356,16 @@ function updateStatusBar() {
   const cur = editorState.currentPage + 1;
   const total = editorState.doc.page_count;
   const sel = editorState.selectedPages.size;
+  const curLabel = editorState.doc.pages[editorState.currentPage]?.label;
 
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "status-page-btn";
   btn.id = "status-page-jump-btn";
   btn.title = "Click to jump to page (Ctrl+G)";
-  btn.textContent = `Page ${cur} of ${total}`;
+  btn.textContent = curLabel && curLabel !== String(cur)
+    ? `Page ${curLabel} (${cur} of ${total})`
+    : `Page ${cur} of ${total}`;
   btn.addEventListener("click", openStatusPageJump);
 
   if (sel > 0) {
@@ -247,6 +419,24 @@ function setupAutosave() {
   });
 }
 
+function setupCrashRecovery() {
+  if (!isTauri()) return;
+  let snapshotting = false;
+  window.setInterval(async () => {
+    if (snapshotting || editorState.openingFile) return;
+    const doc = editorState.doc;
+    if (!doc || !doc.is_dirty) return;
+    snapshotting = true;
+    try {
+      await Backend.snapshotRecoveryState();
+    } catch (err) {
+      console.warn("Recovery snapshot failed:", err);
+    } finally {
+      snapshotting = false;
+    }
+  }, 15_000);
+}
+
 async function revealWindow() {
   await Promise.allSettled([
     document.fonts.load('600 42px "Lora Variable"'),
@@ -291,6 +481,10 @@ document.addEventListener("DOMContentLoaded", () => {
   new AboutModalView();
   initExternalModals();
 
+  (window as any).__EDITOR_STATE__ = editorState;
+  (window as any).__OPEN_PDF__ = openPdf;
+  (window as any).__BACKEND__ = Backend;
+
   const loading = document.getElementById("document-loading")!;
   const shell = document.getElementById("app-root")!;
   editorState.subscribe(() => {
@@ -301,21 +495,56 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   window.addEventListener("open-page-jump", openStatusPageJump);
+  window.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "b" && editorState.doc && !editorState.openingFile) {
+      e.preventDefault();
+      editorState.setSidebarTab("outline");
+      window.dispatchEvent(new CustomEvent("add-bookmark-current-page"));
+    }
+  });
   setupWindowDragDrop();
+  initImagePasteHandler();
   initWindowCloseGuard();
   setupAutosave();
+  setupCrashRecovery();
   setupStatusBarZoomControls();
 
   editorState.subscribe(updateStatusBar);
   updateStatusBar();
   void revealWindow().catch(console.error);
 
-  if (
-    isTauri() &&
-    editorState.preferences.reopenLastPdf &&
-    !editorState.doc &&
-    editorState.recentFiles.length > 0
-  ) {
-    void openPdf(editorState.recentFiles[0]);
+  if (isTauri()) {
+    void (async () => {
+      const recovery = await Backend.checkRecoveryState().catch(() => null);
+      if (recovery) {
+        try {
+          const { ask } = await import("@tauri-apps/plugin-dialog");
+          const shouldRestore = await ask(
+            `Unsaved changes from a previous session were found for "${recovery.file_name}". Would you like to recover them?`,
+            { title: "Recover Unsaved Session", kind: "warning" }
+          );
+          if (shouldRestore) {
+            editorState.setDocument(await Backend.restoreRecoveryState());
+            toast.show({ message: `Recovered unsaved changes for ${recovery.file_name}.`, type: "success" });
+            return;
+          }
+          await Backend.discardRecoveryState();
+        } catch (err) {
+          console.warn("Crash recovery check failed:", err);
+        }
+      }
+      const launchPath = await Backend.consumeLaunchFile().catch(() => null);
+      if (launchPath) {
+        await openPdf(launchPath);
+        return;
+      }
+      if (
+        editorState.preferences.reopenLastPdf &&
+        !editorState.doc &&
+        editorState.recentFiles.length > 0
+      ) {
+        await openPdf(editorState.recentFiles[0]);
+      }
+    })();
   }
 });

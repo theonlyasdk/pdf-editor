@@ -1,8 +1,9 @@
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use pdf_core::renderer::{PdfRenderer, RawBitmap};
+use std::collections::VecDeque;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const OP_SET_DOC: u8 = 1;
@@ -264,9 +265,23 @@ fn read_error(stdout: &mut BufReader<ChildStdout>) -> String {
 
 pub struct RenderWorkerPool {
     workers: Vec<Mutex<WorkerSlot>>,
-    next_idx: AtomicUsize,
+    free_queue: Mutex<VecDeque<usize>>,
+    free_cv: Condvar,
+    shutdown: AtomicBool,
     #[cfg(windows)]
     _job: Option<win_job::JobHandle>,
+}
+
+struct WorkerLease<'a> {
+    pool: &'a RenderWorkerPool,
+    idx: usize,
+}
+
+impl Drop for WorkerLease<'_> {
+    fn drop(&mut self) {
+        self.pool.free_queue.lock().push_back(self.idx);
+        self.pool.free_cv.notify_one();
+    }
 }
 
 impl RenderWorkerPool {
@@ -280,21 +295,48 @@ impl RenderWorkerPool {
         let job = win_job::JobHandle::new();
 
         let mut workers = Vec::with_capacity(count);
-        for _ in 0..count {
+        let mut free_queue = VecDeque::with_capacity(count);
+        for idx in 0..count {
             let slot = WorkerSlot::spawn(&exe).ok()?;
             #[cfg(windows)]
             if let Some(ref j) = job {
                 j.assign(&slot.child);
             }
             workers.push(Mutex::new(slot));
+            free_queue.push_back(idx);
         }
 
         Some(Self {
             workers,
-            next_idx: AtomicUsize::new(0),
+            free_queue: Mutex::new(free_queue),
+            free_cv: Condvar::new(),
+            shutdown: AtomicBool::new(false),
             #[cfg(windows)]
             _job: job,
         })
+    }
+
+    pub fn wake_waiters(&self) {
+        self.free_cv.notify_all();
+    }
+
+    fn acquire_worker<F>(&self, is_cancelled: &F) -> Result<WorkerLease<'_>, String>
+    where
+        F: Fn() -> bool,
+    {
+        let mut queue = self.free_queue.lock();
+        loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                return Err("Render worker pool shut down".into());
+            }
+            if is_cancelled() {
+                return Err("cancelled".into());
+            }
+            if let Some(idx) = queue.pop_front() {
+                return Ok(WorkerLease { pool: self, idx });
+            }
+            self.free_cv.wait(&mut queue);
+        }
     }
 
     pub fn render_page_rgba(
@@ -304,25 +346,35 @@ impl RenderWorkerPool {
         page_index: usize,
         target_width: u32,
     ) -> Result<RawBitmap, String> {
+        self.render_page_rgba_cancellable(source_id, bytes, page_index, target_width, || false)
+    }
+
+    pub fn render_page_rgba_cancellable<F>(
+        &self,
+        source_id: u64,
+        bytes: &[u8],
+        page_index: usize,
+        target_width: u32,
+        is_cancelled: F,
+    ) -> Result<RawBitmap, String>
+    where
+        F: Fn() -> bool,
+    {
         if self.workers.is_empty() {
             return Err("No render workers available".into());
         }
 
-        let start = self.next_idx.fetch_add(1, Ordering::Relaxed) % self.workers.len();
-        for offset in 0..self.workers.len() {
-            let idx = (start + offset) % self.workers.len();
-            if let Some(mut slot) = self.workers[idx].try_lock() {
-                if !slot.dead {
-                    return slot.render_rgba(source_id, bytes, page_index, target_width);
-                }
-            }
+        let lease = self.acquire_worker(&is_cancelled)?;
+        if is_cancelled() {
+            return Err("cancelled".into());
         }
-
-        let mut slot = self.workers[start].lock();
+        let mut slot = self.workers[lease.idx].lock();
         slot.render_rgba(source_id, bytes, page_index, target_width)
     }
 
     pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.free_cv.notify_all();
         for worker in &self.workers {
             worker.lock().shutdown();
         }

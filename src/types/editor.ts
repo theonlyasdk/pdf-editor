@@ -35,6 +35,7 @@ export interface PageInfo {
   rotation: number;
   media_box: PageBox;
   crop_box?: PageBox | null;
+  label?: string | null;
 }
 
 export interface DocumentMetadata {
@@ -141,6 +142,34 @@ export interface SearchResult {
   bounding_boxes: PageBox[];
 }
 
+export interface TextSpanDto {
+  text: string;
+  rect: PageBox;
+}
+
+export interface LinkDto {
+  rect: PageBox;
+  uri?: string | null;
+  target_page?: number | null;
+}
+
+export type FormFieldType = "text" | "checkbox" | "radio" | "dropdown" | "listbox";
+
+export interface FormFieldDto {
+  id: string;
+  name: string;
+  field_type: FormFieldType;
+  page_index: number;
+  rect: PageBox;
+  value: string;
+  export_value?: string | null;
+  options: string[];
+  multiline: boolean;
+  read_only: boolean;
+  max_len?: number | null;
+  font_size?: number | null;
+}
+
 export type CropRatioMode = "free" | "original" | "1:1" | "4:3" | "16:9";
 export type MeasurementUnit = "pt" | "mm" | "in";
 export type ThemeMode = "system" | "light" | "dark";
@@ -152,11 +181,15 @@ export interface EditorPreferences {
   themeMode: ThemeMode;
   defaultViewMode: ViewMode;
   defaultZoom: DefaultZoomMode;
+  defaultTool: "select" | "hand";
   smoothZoom: boolean;
   animateViewTransitions: boolean;
   gridRadialFlyIn: boolean;
   reopenLastPdf: boolean;
+  showLinks: boolean;
+  showForms: boolean;
   gridColumns: number;
+  zoomSensitivity: number;
   cacheAllPages: boolean;
   units: MeasurementUnit;
   author: string;

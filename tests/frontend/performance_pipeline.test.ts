@@ -239,4 +239,56 @@ describe("Per-page raster keys and concurrent PageRasterQueue", () => {
     await new Promise((r) => setTimeout(r, 15));
     expect(order).toEqual([]); // Off-screen page not loaded when preloadAll is false
   });
+
+  it("passes generation to Backend.renderPageRaw, ignores cancelled errors, and uses getPageGeometry without getBoundingClientRect", async () => {
+    class MockIntersectionObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("IntersectionObserver", MockIntersectionObserver);
+
+    const rectSpy = vi.fn(() => ({ left: 0, right: 200, width: 200, top: 0, bottom: 260, height: 260 }));
+    const root = { getBoundingClientRect: rectSpy } as unknown as HTMLElement;
+    const frame = {
+      isConnected: true,
+      dataset: {} as Record<string, string>,
+      toggleAttribute: vi.fn(),
+      removeAttribute: vi.fn(),
+      querySelector: () => null,
+      appendChild: vi.fn(),
+      dispatchEvent: vi.fn(),
+      getBoundingClientRect: rectSpy,
+    } as unknown as HTMLElement;
+    const canvas = { width: 0, height: 0, getContext: () => ({ putImageData: vi.fn() }) } as unknown as HTMLCanvasElement;
+    vi.stubGlobal("HTMLCanvasElement", canvas.constructor);
+    vi.stubGlobal("HTMLImageElement", class {});
+
+    const seenOptions: Array<{ generation?: number; queueId?: number }> = [];
+    vi.spyOn(Backend, "renderPageRaw").mockImplementation(async (_page, _width, options) => {
+      seenOptions.push({ generation: options?.generation, queueId: options?.queueId });
+      throw new Error("cancelled");
+    });
+
+    const queue = new PageRasterQueue(root, 2, {
+      getPageGeometry: () => ({ inViewport: true, inMargin: true, dist: 10 }),
+    });
+    const secondQueue = new PageRasterQueue(root, 2, {
+      getPageGeometry: () => ({ inViewport: true, inMargin: true, dist: 10 }),
+    });
+    const gen = queue.bumpGeneration();
+    queue.add(frame, canvas, 0, 400);
+    secondQueue.add({ ...frame, dataset: {} } as unknown as HTMLElement, canvas, 1, 200);
+    await new Promise((r) => setTimeout(r, 15));
+
+    expect(seenOptions).toHaveLength(2);
+    expect(seenOptions[0].generation).toBe(gen);
+    expect(seenOptions[1].generation).toBe(0);
+    expect(seenOptions[0].queueId).toBeDefined();
+    expect(seenOptions[1].queueId).toBeDefined();
+    expect(seenOptions[0].queueId).not.toBe(seenOptions[1].queueId);
+    expect(rectSpy).not.toHaveBeenCalled();
+    expect(frame.dataset.raster).toBe("loading");
+    expect(frame.appendChild).not.toHaveBeenCalled();
+  });
 });

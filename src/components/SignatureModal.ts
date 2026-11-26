@@ -74,15 +74,12 @@ function trimCanvasToPng(canvas: HTMLCanvasElement): { dataUrl: string; width: n
   return { dataUrl: out.toDataURL("image/png"), width: sw, height: sh };
 }
 
-/** Rasterize any uploaded PNG/JPEG/SVG file into a PNG data URL with intrinsic dimensions. */
-async function rasterizeImageFile(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
-  const rawUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Could not read image file."));
-    reader.readAsDataURL(file);
-  });
-
+/** Rasterize an image data URL into a normalized PNG data URL with intrinsic dimensions. */
+export async function rasterizeImageDataUrl(
+  rawUrl: string,
+  maxDim = 900,
+  isSvg = false
+): Promise<{ dataUrl: string; width: number; height: number }> {
   const img = await new Promise<HTMLImageElement>((resolve, reject) => {
     const el = new Image();
     el.onload = () => resolve(el);
@@ -92,9 +89,8 @@ async function rasterizeImageFile(file: File): Promise<{ dataUrl: string; width:
 
   const natW = img.naturalWidth || 320;
   const natH = img.naturalHeight || 120;
-  const maxDim = 900;
   const scale = Math.min(1, maxDim / Math.max(natW, natH));
-  const targetW = Math.max(16, Math.round(natW * (file.type === "image/svg+xml" && Math.max(natW, natH) < 300 ? 2 : scale)));
+  const targetW = Math.max(16, Math.round(natW * (isSvg && Math.max(natW, natH) < 300 ? 2 : scale)));
   const targetH = Math.max(16, Math.round(natH * (targetW / natW)));
 
   const canvas = document.createElement("canvas");
@@ -108,6 +104,26 @@ async function rasterizeImageFile(file: File): Promise<{ dataUrl: string; width:
     width: targetW,
     height: targetH,
   };
+}
+
+/** Rasterize any uploaded PNG/JPEG/SVG blob or file into a PNG data URL with intrinsic dimensions. */
+export async function rasterizeImageBlob(
+  file: Blob,
+  maxDim = 900
+): Promise<{ dataUrl: string; width: number; height: number }> {
+  const rawUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("Could not read image file."));
+    reader.readAsDataURL(file);
+  });
+
+  return rasterizeImageDataUrl(rawUrl, maxDim, file.type === "image/svg+xml");
+}
+
+/** Rasterize any uploaded PNG/JPEG/SVG file into a PNG data URL with intrinsic dimensions. */
+async function rasterizeImageFile(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
+  return rasterizeImageBlob(file, 900);
 }
 
 /** Render a crisp vector-styled custom text/date stamp into a PNG data URL. */

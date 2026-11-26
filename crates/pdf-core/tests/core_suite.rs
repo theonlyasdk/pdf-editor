@@ -261,6 +261,7 @@ fn crop_coordinates_use_the_visible_page_and_pdf_rotation() {
             height,
             media_box: PageBox::new(10.0, 20.0, 612.0, 792.0),
             crop_box: Some(visible),
+            label: None,
         };
         assert_eq!(
             page.viewport_crop(PageBox::new(0.0, 0.0, width, height)),
