@@ -28,6 +28,7 @@ import {
 import { rasterizeImageBlob } from "./components/SignatureModal";
 import { STRINGS } from "./i18n/strings";
 import { Backend } from "./ipc/backend";
+import { checkForUpdates, shouldAutoCheckForUpdates } from "./services/updateChecker";
 import { editorState } from "./state/editorState";
 
 const externalModalModules = import.meta.glob<Record<string, unknown>>(
@@ -437,6 +438,27 @@ function setupCrashRecovery() {
   }, 15_000);
 }
 
+function setupAutoUpdateCheck() {
+  if (!shouldAutoCheckForUpdates(editorState.preferences.autoCheckUpdates)) return;
+  window.setTimeout(async () => {
+    if (!editorState.preferences.autoCheckUpdates) return;
+    const result = await checkForUpdates();
+    if (result.status === "update-available" && result.latestVersion) {
+      toast.show({
+        message: `Update available: v${result.latestVersion}`,
+        type: "info",
+        durationMs: 8000,
+        action: {
+          label: STRINGS.preferences.downloadUpdate,
+          onClick: () => {
+            void Backend.openExternalUrl(result.releaseUrl);
+          },
+        },
+      });
+    }
+  }, 2500);
+}
+
 async function revealWindow() {
   await Promise.allSettled([
     document.fonts.load('600 42px "Lora Variable"'),
@@ -507,6 +529,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initWindowCloseGuard();
   setupAutosave();
   setupCrashRecovery();
+  setupAutoUpdateCheck();
   setupStatusBarZoomControls();
 
   editorState.subscribe(updateStatusBar);

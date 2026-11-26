@@ -33,6 +33,7 @@ export const DEFAULT_PREFERENCES: EditorPreferences = {
   author: "User",
   makeBackup: true,
   autosaveIntervalSec: 0,
+  autoCheckUpdates: true,
 };
 
 function clampGridColumns(value: unknown): number {
@@ -138,6 +139,7 @@ class EditorState {
         this.preferences.reopenLastPdf = Boolean(this.preferences.reopenLastPdf);
         this.preferences.gridColumns = clampGridColumns(this.preferences.gridColumns);
         this.preferences.cacheAllPages = Boolean(this.preferences.cacheAllPages);
+        this.preferences.autoCheckUpdates = this.preferences.autoCheckUpdates !== false;
       } else {
         const savedTheme = localStorage.getItem("pdf_editor_theme");
         if (savedTheme === "light" || savedTheme === "dark" || savedTheme === "system") {
@@ -643,6 +645,9 @@ class EditorState {
     }
     if (partial.cacheAllPages !== undefined) {
       this.preferences.cacheAllPages = Boolean(partial.cacheAllPages);
+    }
+    if (partial.autoCheckUpdates !== undefined) {
+      this.preferences.autoCheckUpdates = Boolean(partial.autoCheckUpdates);
     }
     if (partial.themeMode !== undefined) {
       this.theme = resolveEffectiveTheme(this.preferences.themeMode);

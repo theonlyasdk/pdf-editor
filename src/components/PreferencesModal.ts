@@ -1,15 +1,50 @@
-import { AlertTriangle, BookOpen, Grid2X2, Palette, RotateCcw, Save, Settings, Trash2, X } from "lucide";
+import {
+  AlertTriangle,
+  ArrowUpCircle,
+  BookOpen,
+  CheckCircle2,
+  ExternalLink,
+  Grid2X2,
+  Palette,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Settings,
+  Trash2,
+  X,
+} from "lucide";
 import { STRINGS } from "../i18n/strings";
+import { Backend } from "../ipc/backend";
+import {
+  APP_VERSION,
+  checkForUpdates,
+  formatLastChecked,
+  loadLastUpdateCheck,
+  UpdateCheckResult,
+} from "../services/updateChecker";
 import { editorState } from "../state/editorState";
 import { DefaultZoomMode, MeasurementUnit, ThemeMode, ViewMode } from "../types/editor";
 import { toast } from "./Toast";
 import { icon } from "./ui/icon";
 import { animateDialogSize, initSlidingTabs } from "./ui/modalMotion";
 
+type PrefsTab = "appearance" | "editing" | "grid" | "saving" | "updates";
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 export class PreferencesModalView {
   private dialog: HTMLDialogElement;
   private focusReturn: HTMLElement | null = null;
-  private activeTab: "appearance" | "editing" | "grid" | "saving" = "appearance";
+  private activeTab: PrefsTab = "appearance";
+  private isCheckingUpdates = false;
+  private lastUpdateCheck: UpdateCheckResult | null = null;
 
   constructor() {
     this.dialog = document.createElement("dialog");
@@ -28,12 +63,19 @@ export class PreferencesModalView {
       this.focusReturn = null;
     });
 
-    window.addEventListener("open-preferences", () => this.open());
+    window.addEventListener("open-preferences", (e) => {
+      const detail = e instanceof CustomEvent ? (e.detail as { tab?: PrefsTab } | undefined) : undefined;
+      if (detail?.tab) {
+        this.activeTab = detail.tab;
+      }
+      this.open();
+    });
   }
 
   open() {
     if (this.dialog.open) return;
     this.focusReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    this.lastUpdateCheck = loadLastUpdateCheck();
     this.render();
     this.dialog.showModal();
     this.dialog.querySelector<HTMLElement>("select, input, button")?.focus();
@@ -76,6 +118,10 @@ export class PreferencesModalView {
             <button type="button" class="prefs-tab-btn ${this.activeTab === "saving" ? "active" : ""}" role="tab" aria-selected="${this.activeTab === "saving"}" data-prefs-tab-btn="saving">
               ${icon(Save, 15)}
               <span>Saving &amp; Data</span>
+            </button>
+            <button type="button" class="prefs-tab-btn ${this.activeTab === "updates" ? "active" : ""}" role="tab" aria-selected="${this.activeTab === "updates"}" data-prefs-tab-btn="updates">
+              ${icon(RefreshCw, 15)}
+              <span>Updates</span>
             </button>
           </nav>
 
@@ -230,6 +276,28 @@ export class PreferencesModalView {
               </button>
             </div>
           </section>
+
+          <section class="prefs-section" data-prefs-panel="updates" ${this.activeTab === "updates" ? "" : "hidden"}>
+            <h3 class="prefs-section-title">${STRINGS.preferences.updates}</h3>
+
+            <label class="ui-check prefs-check">
+              <input type="checkbox" id="prefs-auto-check-updates" ${prefs.autoCheckUpdates ? "checked" : ""} />
+              <span>${STRINGS.preferences.autoCheckUpdates}</span>
+            </label>
+
+            <div class="prefs-row prefs-row--actions">
+              <div class="prefs-update-meta">
+                <span class="prefs-label">Installed version: <strong>v${escapeHtml(APP_VERSION)}</strong></span>
+                <span class="prefs-sublabel" id="prefs-update-last-checked">Last checked: ${escapeHtml(formatLastChecked(this.lastUpdateCheck?.checkedAt))}</span>
+              </div>
+              <button type="button" class="ui-button ui-button--outline ui-button--sm" id="prefs-check-updates" ${this.isCheckingUpdates ? "disabled" : ""}>
+                ${icon(RefreshCw, 14)}
+                <span>${this.isCheckingUpdates ? STRINGS.preferences.checkingUpdates : STRINGS.preferences.checkForUpdates}</span>
+              </button>
+            </div>
+
+            <div id="prefs-update-status-container">${this.renderUpdateStatusHtml()}</div>
+          </section>
           </div>
         </div>
 
@@ -253,7 +321,7 @@ export class PreferencesModalView {
     const sliding = sidebar ? initSlidingTabs(sidebar, "[data-prefs-tab-btn]") : null;
     this.dialog.querySelectorAll<HTMLButtonElement>("[data-prefs-tab-btn]").forEach((btn) => {
       btn.addEventListener("click", () => {
-        const tab = btn.dataset.prefsTabBtn as "appearance" | "editing" | "grid" | "saving" | undefined;
+        const tab = btn.dataset.prefsTabBtn as PrefsTab | undefined;
         if (!tab || tab === this.activeTab) return;
         this.activeTab = tab;
         const card = this.dialog.querySelector<HTMLElement>(".editor-modal-card");
@@ -366,10 +434,117 @@ export class PreferencesModalView {
       this.render();
     });
 
+    this.dialog.querySelector<HTMLInputElement>("#prefs-auto-check-updates")?.addEventListener("change", (e) => {
+      editorState.updatePreferences({ autoCheckUpdates: (e.target as HTMLInputElement).checked });
+    });
+
+    this.dialog.querySelector("#prefs-check-updates")?.addEventListener("click", () => {
+      void this.handleManualUpdateCheck();
+    });
+
+    this.bindUpdateStatusActions();
+
     this.dialog.querySelector("#prefs-reset-btn")?.addEventListener("click", () => {
       editorState.resetPreferences();
       toast.show({ message: "Preferences reset to defaults.", type: "info" });
       this.render();
     });
+  }
+
+  private renderUpdateStatusHtml(): string {
+    if (this.isCheckingUpdates) {
+      return `
+        <div class="ui-alert prefs-update-status" role="status">
+          ${icon(RefreshCw, 16)}
+          <span>Checking GitHub releases for updates…</span>
+        </div>
+      `;
+    }
+
+    const result = this.lastUpdateCheck;
+    if (!result) return "";
+
+    if (result.status === "update-available" && result.latestVersion) {
+      return `
+        <div class="ui-alert prefs-update-status prefs-update-status--available" role="status">
+          ${icon(ArrowUpCircle, 16)}
+          <div class="prefs-update-status-body">
+            <div class="prefs-update-status-title">
+              <span>Update available: <strong>v${escapeHtml(result.latestVersion)}</strong></span>
+              <span class="ui-badge ui-badge--accent">New</span>
+            </div>
+            ${result.releaseName ? `<p class="prefs-sublabel">${escapeHtml(result.releaseName)}</p>` : ""}
+          </div>
+          <button type="button" class="ui-button ui-button--default ui-button--sm" id="prefs-open-release-btn">
+            ${icon(ExternalLink, 14)}
+            <span>${STRINGS.preferences.downloadUpdate}</span>
+          </button>
+        </div>
+      `;
+    }
+
+    if (result.status === "up-to-date") {
+      return `
+        <div class="ui-alert prefs-update-status prefs-update-status--ok" role="status">
+          ${icon(CheckCircle2, 16)}
+          <span>You're up to date (v${escapeHtml(result.currentVersion)}).</span>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="ui-alert ui-alert--warning prefs-warning" role="alert">
+        ${icon(AlertTriangle, 16)}
+        <span>${escapeHtml(result.error || "Could not check for updates.")}</span>
+      </div>
+    `;
+  }
+
+  private refreshUpdateSection() {
+    const checkBtn = this.dialog.querySelector<HTMLButtonElement>("#prefs-check-updates");
+    if (checkBtn) {
+      checkBtn.disabled = this.isCheckingUpdates;
+      const label = checkBtn.querySelector("span");
+      if (label) {
+        label.textContent = this.isCheckingUpdates
+          ? STRINGS.preferences.checkingUpdates
+          : STRINGS.preferences.checkForUpdates;
+      }
+      checkBtn.classList.toggle("is-checking", this.isCheckingUpdates);
+    }
+
+    const lastCheckedEl = this.dialog.querySelector<HTMLElement>("#prefs-update-last-checked");
+    if (lastCheckedEl) {
+      lastCheckedEl.textContent = `Last checked: ${formatLastChecked(this.lastUpdateCheck?.checkedAt)}`;
+    }
+
+    const statusContainer = this.dialog.querySelector<HTMLElement>("#prefs-update-status-container");
+    if (statusContainer) {
+      statusContainer.innerHTML = this.renderUpdateStatusHtml();
+      this.bindUpdateStatusActions();
+    }
+  }
+
+  private bindUpdateStatusActions() {
+    this.dialog.querySelector("#prefs-open-release-btn")?.addEventListener("click", () => {
+      if (this.lastUpdateCheck?.releaseUrl) {
+        void Backend.openExternalUrl(this.lastUpdateCheck.releaseUrl);
+      }
+    });
+  }
+
+  private async handleManualUpdateCheck() {
+    if (this.isCheckingUpdates) return;
+    this.isCheckingUpdates = true;
+    this.refreshUpdateSection();
+
+    try {
+      this.lastUpdateCheck = await checkForUpdates();
+    } finally {
+      this.isCheckingUpdates = false;
+      if (this.dialog.open) {
+        this.refreshUpdateSection();
+      }
+    }
   }
 }

@@ -1,5 +1,6 @@
 import { ExternalLink } from "lucide";
 import { Backend } from "../ipc/backend";
+import { APP_VERSION } from "../services/updateChecker";
 import { icon } from "./ui/icon";
 
 const SOURCE_REPO_URL = "https://github.com/theonlyasdk/pdf-editor";
@@ -39,7 +40,7 @@ export class AboutModalView {
             <div class="about-app-icon">${APP_ICON_SVG}</div>
             <div class="about-hero-text">
               <h2 class="about-project-name" id="about-project-name">PDF Editor</h2>
-              <p class="about-version">Version 0.4.0</p>
+              <p class="about-version">Version ${APP_VERSION}</p>
             </div>
           </div>
 

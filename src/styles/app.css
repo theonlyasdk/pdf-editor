@@ -2021,6 +2021,76 @@
   color: var(--warning);
 }
 
+.prefs-update-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.prefs-sublabel {
+  font-size: 12px;
+  color: var(--muted-foreground);
+  margin: 0;
+}
+
+.prefs-update-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  background: var(--background);
+}
+
+.prefs-update-status svg {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+
+.prefs-update-status--ok svg {
+  color: var(--primary);
+}
+
+.prefs-update-status--available {
+  border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+  background: color-mix(in srgb, var(--primary) 8%, var(--card));
+}
+
+.prefs-update-status--available svg {
+  color: var(--primary);
+}
+
+.prefs-update-status-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.prefs-update-status-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#prefs-check-updates.is-checking svg {
+  animation: prefs-spin 0.9s linear infinite;
+}
+
+@keyframes prefs-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #prefs-check-updates.is-checking svg {
+    animation: none;
+  }
+}
+
 /* Shortcuts Modal */
 .shortcuts-search-bar {
   display: flex;

@@ -195,6 +195,7 @@ export interface EditorPreferences {
   author: string;
   makeBackup: boolean;
   autosaveIntervalSec: number;
+  autoCheckUpdates: boolean;
 }
 
 export interface ToolSettings {

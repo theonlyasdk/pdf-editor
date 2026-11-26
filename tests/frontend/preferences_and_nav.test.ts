@@ -42,6 +42,7 @@ describe("Preferences, Navigation & Workspace State", () => {
       author: "Alice",
       makeBackup: false,
       autosaveIntervalSec: 60,
+      autoCheckUpdates: false,
     });
 
     expect(editorState.theme).toBe("dark");
@@ -57,6 +58,7 @@ describe("Preferences, Navigation & Workspace State", () => {
     expect(editorState.toolSettings.author).toBe("Alice");
     expect(editorState.preferences.makeBackup).toBe(false);
     expect(editorState.preferences.autosaveIntervalSec).toBe(60);
+    expect(editorState.preferences.autoCheckUpdates).toBe(false);
 
     editorState.updatePreferences({ gridColumns: 99 });
     expect(editorState.preferences.gridColumns).toBe(12);

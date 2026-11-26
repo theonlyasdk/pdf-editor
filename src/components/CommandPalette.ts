@@ -416,6 +416,14 @@ export class CommandPaletteView {
         },
       },
       {
+        id: "check-updates",
+        category: "Help",
+        label: "Check for Updates...",
+        action: () => {
+          window.dispatchEvent(new CustomEvent("open-preferences", { detail: { tab: "updates" } }));
+        },
+      },
+      {
         id: "open-shortcuts",
         category: "Workspace",
         label: "Keyboard Shortcuts",

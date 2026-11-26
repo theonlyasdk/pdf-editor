@@ -5,6 +5,10 @@ export interface ToastOptions {
   message: string;
   durationMs?: number;
   undoAction?: () => void;
+  action?: {
+    label: string;
+    onClick: () => void;
+  };
   type?: "info" | "success" | "warning" | "error";
 }
 
@@ -42,6 +46,17 @@ class ToastManager {
         this.dismiss(toast);
       };
       toast.appendChild(undoBtn);
+    }
+
+    if (options.action) {
+      const actionBtn = document.createElement("button");
+      actionBtn.className = "ui-button ui-button--sm ui-button--outline";
+      actionBtn.textContent = options.action.label;
+      actionBtn.onclick = () => {
+        options.action?.onClick();
+        this.dismiss(toast);
+      };
+      toast.appendChild(actionBtn);
     }
 
     const closeBtn = document.createElement("button");
